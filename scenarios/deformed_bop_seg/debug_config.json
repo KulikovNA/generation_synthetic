@@ -1,0 +1,25 @@
+{
+    "mode": "deformed_bop_seg",
+    "parallel_process_on_one_gpu": 3,
+    "num_gpus": 1,
+    "num_chunk": 10,
+    "dataset_parent_path": "/home/nikita/data_generator/generation_dataset/syntetic_datasets/prepared",
+    "bop_dataset_name": "differBig",
+    "bop_toolkit_path": "/home/nikita/data_generator/generation_dataset/bop_toolkit",
+    "cc_textures": 
+        {
+            "cc_textures_path": "/home/nikita/data_generator/generation_dataset/syntetic_datasets/resources/textures_2k_plate",
+            "cc_textures_object_path": "/home/nikita/data_generator/generation_dataset/syntetic_datasets/resources/textures_1k_modules"
+        },
+    "output_dir": "/home/nikita/data_generator/dataset_03_07/differBig/2024-10-07",
+    "save_config": true,
+    "random_camera_rotation": false,
+    "runs": 1066.6666666666667,
+    "temp_dir_rgb": "/tmp/blender_rgb_id0ip0enwzbdpm",
+    "temp_dir_segmap": "/tmp/blender_segmap_id0ip00z2r1r1h",
+    "file_prefix_rgb": "rgb_id0ip0_",
+    "file_prefix_segmap": "segmap_id0ip0_",
+    "max_amount_of_samples": 1024,
+    "id_target_obj": 3,
+    "poses_cam": 25
+}

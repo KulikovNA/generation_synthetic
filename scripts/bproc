@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+
+: "${BPROC_VERSION:=2.7.1}"
+DEFAULT_BPROC_BLENDER_DIR="$HOME/.cache/blenderproc-$BPROC_VERSION/blender"
+STATE_FILE="$REPO_ROOT/.bproc_blender_dir"
+: "${BOP_TOOLKIT_GIT:=git+https://github.com/thodan/bop_toolkit}"
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+resolve_blender_dir() {
+  if [[ -n "${BPROC_BLENDER_DIR:-}" ]]; then echo "$BPROC_BLENDER_DIR"; return; fi
+  if [[ -f "$STATE_FILE" ]]; then tr -d '\r\n' < "$STATE_FILE"; return; fi
+  echo "$DEFAULT_BPROC_BLENDER_DIR"
+}
+
+# Output: PYBIN|SYS_SITEPKG
+blender_python_info() {
+  local install_path="$1"
+
+  # blenderproc quickstart creates install_path/blender-*
+  local BLENDER_DIR
+  BLENDER_DIR="$(find "$install_path" -maxdepth 1 -type d -name 'blender-*' | sort | tail -n 1)"
+  [[ -n "${BLENDER_DIR:-}" ]] || die "Blender not found under $install_path"
+
+  local MAJOR_VERSION
+  MAJOR_VERSION="$(find "$BLENDER_DIR" -maxdepth 1 -type d -regextype posix-extended -regex '.*/[0-9]+\.[0-9]+' \
+    | sort | tail -n 1 | xargs -n1 basename)"
+  [[ -n "${MAJOR_VERSION:-}" ]] || die "Can't detect Blender major version in $BLENDER_DIR"
+
+  local PYBIN
+  PYBIN="$(find "$BLENDER_DIR/$MAJOR_VERSION/python/bin" -maxdepth 1 -type f -executable -name 'python3*' | sort | head -n 1)"
+  [[ -x "${PYBIN:-}" ]] || die "Can't find Blender python in $BLENDER_DIR/$MAJOR_VERSION/python/bin"
+
+  local PYVER
+  PYVER="$("$PYBIN" -c 'import sys; print(f"python{sys.version_info.major}.{sys.version_info.minor}")')"
+
+  # IMPORTANT: Blender реально использует ЭТОТ site-packages (как в твоём логе)
+  local SYS_SITEPKG="$BLENDER_DIR/$MAJOR_VERSION/python/lib/$PYVER/site-packages"
+
+  echo "$PYBIN|$SYS_SITEPKG"
+}
+
+bpy_pip() {
+  local dir; dir="$(resolve_blender_dir)"
+  local info PYBIN
+  info="$(blender_python_info "$dir")"
+  PYBIN="${info%%|*}"
+  "$PYBIN" -m pip "$@"
+}
+
+cmd_env() {
+  local dir; dir="$(resolve_blender_dir)"
+  cat <<EOF
+export PATH="$REPO_ROOT/scripts:\$PATH"
+export BPROC_BLENDER_DIR="$(printf '%q' "$dir")"
+export BPROC_PATCH_DIR="$(printf '%q' "$REPO_ROOT/scripts")"
+EOF
+}
+
+cmd_setup() {
+  local dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --blender-dir) dir="$2"; shift 2;;
+      *) die "Unknown arg: $1";;
+    esac
+  done
+  [[ -n "$dir" ]] || dir="$(resolve_blender_dir)"
+  mkdir -p "$dir"
+  dir="$(cd "$dir" && pwd)"
+
+  echo "[1/6] Host deps (conda)"
+  command -v python >/dev/null || die "python not found"
+  python -m pip install -U pip
+  python -m pip install \
+    "blenderproc==$BPROC_VERSION" \
+    "numpy==1.24.4" \
+    "pyyaml==6.0.1" \
+    "filelock==3.13.1"
+
+  echo "[2/6] Host: install local blendforge (editable)"
+  python -m pip install -e "$REPO_ROOT/blendforge"
+
+  echo "[3/6] Ensure Blender exists at: $dir"
+  blenderproc quickstart --blender-install-path "$dir"
+
+  echo "[4/6] Record path -> $STATE_FILE"
+  echo "$dir" > "$STATE_FILE"
+
+  echo "[5/6] Blender-Python: bootstrap pip + minimal deps (SYSTEM site-packages)"
+  local info PYBIN SYS_SITEPKG
+  info="$(blender_python_info "$dir")"
+  PYBIN="${info%%|*}"; SYS_SITEPKG="${info#*|}"
+
+  mkdir -p "$SYS_SITEPKG"
+
+  # ensure pip exists
+  "$PYBIN" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  "$PYBIN" -m pip install -U pip setuptools wheel
+  "$PYBIN" -m pip install filelock==3.13.1 pyyaml==6.0.1
+
+  echo "[5b/6] Blender-Python: make local repos importable via .pth (SYSTEM site-packages)"
+  local PTH="$SYS_SITEPKG/generation_synthetic_locals.pth"
+  local BF="$REPO_ROOT/blendforge"
+  [[ -d "$BF/src" ]] && BF="$BF/src"
+  cat > "$PTH" <<EOF
+$BF
+$REPO_ROOT
+EOF
+  echo "Wrote: $PTH"
+
+  echo "[6/6] Blender-Python: install bop_toolkit + autopatch loader (SYSTEM site-packages)"
+  "$PYBIN" -m pip install -U "$BOP_TOOLKIT_GIT"
+
+  [[ -f "$REPO_ROOT/scripts/bop_custom_patch.py" ]] || die "Missing scripts/bop_custom_patch.py"
+  [[ -f "$REPO_ROOT/scripts/bop_autopatch_install.sh" ]] || die "Missing scripts/bop_autopatch_install.sh"
+  bash "$REPO_ROOT/scripts/bop_autopatch_install.sh" --sitepkgs "$SYS_SITEPKG"
+
+  echo "OK."
+  echo "Next:"
+  echo "  eval \"\$(scripts/bproc env)\""
+}
+
+cmd_pip() {
+  bpy_pip "$@"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  scripts/bproc setup [--blender-dir PATH]
+  scripts/bproc env
+  scripts/bproc pip <pip-args...>
+
+Env overrides:
+  BOP_TOOLKIT_GIT=git+https://... (pin commit/tag if needed)
+  BPROC_VERSION=2.7.1
+EOF
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    setup) cmd_setup "$@";;
+    env) cmd_env;;
+    pip) cmd_pip "$@";;
+    ""|-h|--help) usage;;
+    *) die "Unknown command: $cmd";;
+  esac
+}
+
+main "$@"

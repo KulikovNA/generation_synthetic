@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SELF="$(readlink -f "$0")"
+SELF_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"
+
+# Find the real blenderproc (skip this wrapper)
+REAL=""
+IFS=':' read -ra DIRS <<< "$PATH"
+for d in "${DIRS[@]}"; do
+  cand="$d/blenderproc"
+  [[ -x "$cand" ]] || continue
+  cand="$(readlink -f "$cand")"
+  if [[ "$cand" != "$SELF" ]]; then
+    REAL="$cand"
+    break
+  fi
+done
+[[ -n "$REAL" ]] || { echo "ERROR: real blenderproc not found in PATH."; exit 127; }
+
+# Determine install path
+INSTALL_PATH="${BPROC_BLENDER_DIR:-}"
+if [[ -z "$INSTALL_PATH" && -f "$REPO_ROOT/.bproc_blender_dir" ]]; then
+  INSTALL_PATH="$(tr -d '\r\n' < "$REPO_ROOT/.bproc_blender_dir")"
+fi
+[[ -n "$INSTALL_PATH" ]] || { echo "ERROR: Blender install path not set. Run: scripts/bproc setup"; exit 2; }
+
+# Pass through if no args
+if [[ $# -lt 1 ]]; then
+  exec "$REAL"
+fi
+
+sub="$1"; shift
+
+case "$sub" in
+  run|debug|quickstart)
+    has_path=0
+    for a in "$@"; do
+      [[ "$a" == "--blender-install-path" || "$a" == "--custom-blender-path" ]] && has_path=1
+    done
+    if [[ $has_path -eq 1 ]]; then
+      exec "$REAL" "$sub" "$@"
+    else
+      exec "$REAL" "$sub" --blender-install-path "$INSTALL_PATH" "$@"
+    fi
+    ;;
+  *)
+    exec "$REAL" "$sub" "$@"
+    ;;
+esac

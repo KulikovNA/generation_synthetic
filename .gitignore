@@ -1,0 +1,65 @@
+# =========================
+# Big data / generated stuff
+# =========================
+resources/
+prepared/
+output/
+examples/
+**/resources/
+**/prepared/
+**/output/
+**/examples/
+
+# Blender / BlenderProc temp & cache
+/tmp/
+**/*.blend1
+**/*.blend2
+**/*.log
+**/cache/
+**/.cache/
+
+# =========================
+# Python artifacts
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs / conda (на всякий случай)
+.venv/
+venv/
+ENV/
+env/
+.env/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.egg
+*.whl
+
+# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Local-only scripts/configs
+# =========================
+scripts_internal/
+
+# =========================
+# Other
+# =========================
+.bproc_blender_dir
