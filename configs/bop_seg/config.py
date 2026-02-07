@@ -14,15 +14,17 @@ runs = 5
 runs_process = 1 
 dataset_type = "test"
 
-dataset_parent_path = "/home/nikita/data_generator/generation_dataset/syntetic_datasets/prepared"
+#dataset_parent_path = "/home/nikita/data_generator/generation_dataset/syntetic_datasets/prepared"
+dataset_parent_path = "prepared"
 bop_dataset_name = "differBig"
 #bop_toolkit_path = "/home/nikita/data_generator/generation_dataset/bop_toolkit"
 # путь к текстурам 
 cc_textures = dict(
-    cc_textures_path = "/home/nikita/data_generator/generation_dataset/syntetic_datasets/resources/textures_2k_plate",
-    cc_textures_object_path = "/home/nikita/data_generator/generation_dataset/syntetic_datasets/resources/textures_1k_modules"
+    cc_textures_path = "resources/textures_2k_plate",
+    cc_textures_object_path = "resources/textures_1k_modules"
     )
-output_dir = "/home/nikita/data_generator/bop_seg/"
+
+output_dir = "output/bop_seg/"
 
 save_config = True
 max_amount_of_samples = 50

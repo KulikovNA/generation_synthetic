@@ -2,17 +2,16 @@ mode = "bop_lol"
 split = "train"           # "train" | "val" | "test"
 
 # ==== ПУТИ ====
-dataset_parent_path = "/home/nikita/data_generator/generation_dataset/syntetic_datasets/prepared"
+dataset_parent_path = "prepared"
 bop_dataset_name    = "differBig"
-bop_toolkit_path    = "/home/nikita/data_generator/generation_dataset/bop_toolkit"
 
 cc_textures = dict(
-    cc_textures_path = "/home/nikita/data_generator/generation_dataset/syntetic_datasets/resources/textures_2k_plate",
-    cc_textures_object_path = "/home/nikita/data_generator/generation_dataset/syntetic_datasets/resources/textures_1k_modules"
+    cc_textures_path = "resources/textures_2k_plate",
+    cc_textures_object_path = "resources/textures_1k_modules"
 )
 
 # Корень датасета LOL-стиля (внутри скрипт создаст <split>/input, <split>/target, pairs.txt, meta.jsonl)
-output_dir_lol = "/home/nikita/data_generator/lol_data/"
+output_dir_lol = "output/lol_data/"
 
 # ==== ПАРАМЕТРЫ РЕНДЕРА / СЦЕН ====
 poses_cam = 15      # поз на сцену

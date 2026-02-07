@@ -12,15 +12,14 @@ runs_one_fracture = 1
 runs_process = 14 
 dataset_type = "train"
 
-dataset_parent_path = "/home/nikita/data_generator/generation_dataset/generation_synthetic/prepared"
+dataset_parent_path = "prepared"
 bop_dataset_name = "differSmall"
-bop_toolkit_path = "/home/nikita/data_generator/generation_dataset/bop_toolkit"
 # путь к текстурам 
 cc_textures = dict(
-    cc_textures_path = "/home/nikita/data_generator/generation_dataset/generation_synthetic/resources/textures_2k_plate",
-    cc_textures_object_path = "/home/nikita/data_generator/generation_dataset/generation_synthetic/resources/textures_1k_modules"
+    cc_textures_path = "resources/textures_2k_plate",
+    cc_textures_object_path = "resources/textures_1k_modules"
     )
-output_dir = "/home/nikita/data_generator/test4/"
+output_dir = "output/fract_6dpe"
 
 save_config = True
 max_amount_of_samples = None

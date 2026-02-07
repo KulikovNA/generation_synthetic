@@ -207,7 +207,6 @@ class Config:
         print(self._data)
         if self._data['dataset_parent_path']:
             self._data['dataset_parent_path'] = self._get_absolute_path(self._data['dataset_parent_path'])
-            self._data['bop_toolkit_path'] = self._get_absolute_path(self._data['bop_toolkit_path'])
             #self._data['output_dir'] = self._get_absolute_path(self._data['output_dir'])
         else: raise ValueError("dataset_parent_path не может быть пустым")
 
@@ -215,7 +214,6 @@ class Config:
         print(self._data)
         if self._data['dataset_parent_path']:
             self._data['dataset_parent_path'] = self._get_absolute_path(self._data['dataset_parent_path'])
-            self._data['bop_toolkit_path'] = self._get_absolute_path(self._data['bop_toolkit_path'])
             #self._data['output_dir'] = self._get_absolute_path(self._data['output_dir'])
         else: raise ValueError("dataset_parent_path не может быть пустым")
 
@@ -229,13 +227,12 @@ class Config:
         print(self._data)
 
         # --- обязательные пути ---
-        for key in ['dataset_parent_path', 'bop_toolkit_path', 'bop_dataset_name']:
+        for key in ['dataset_parent_path', 'bop_dataset_name']:
             if not self._data.get(key):
                 raise ValueError(f"Parameter '{key}' is required for mode 'bop_lol'.")
 
         # абсолютные пути
         self._data['dataset_parent_path'] = self._get_absolute_path(self._data['dataset_parent_path'])
-        self._data['bop_toolkit_path']    = self._get_absolute_path(self._data['bop_toolkit_path'])
         # bop_dataset_name — имя датасета (без абсолютизации)
 
         # --- split ---
@@ -286,7 +283,6 @@ class Config:
         print(self._data)
         if self._data['dataset_parent_path']:
             self._data['dataset_parent_path'] = self._get_absolute_path(self._data['dataset_parent_path'])
-            #self._data['bop_toolkit_path'] = self._get_absolute_path(self._data['bop_toolkit_path'])
             #self._data['output_dir'] = self._get_absolute_path(self._data['output_dir'])
         else: raise ValueError("dataset_parent_path не может быть пустым")
 
@@ -294,7 +290,6 @@ class Config:
         print(self._data)
         if self._data['bop_parent_path']:
             self._data['bop_parent_path'] = self._get_absolute_path(self._data['bop_parent_path'])
-            #self._data['bop_toolkit_path'] = self._get_absolute_path(self._data['bop_toolkit_path'])
             #self._data['output_dir'] = self._get_absolute_path(self._data['output_dir'])
         else: raise ValueError("bop_parent_path не может быть пустым")
 
