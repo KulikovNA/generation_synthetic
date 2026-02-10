@@ -93,3 +93,11 @@ eval "$(scripts/bproc env)"
 ```bash
 python runers/run_seg_bop.py --config_path configs/bop_seg/config.py
 ```
+
+## 4) Запуск других проектов 
+
+Генерация в формате LOL : 
+
+```bash 
+./run.sh --runner run_bop_lol.py --config_path configs/bop_lol/config.py 
+```

@@ -2,16 +2,14 @@ import blenderproc as bproc
 import argparse, os, sys, math, json
 import numpy as np
 from datetime import datetime
-
+import bpy
 
 
 from blendforge.blender_runtime.CustomLightSetting import TemperatureToRGBConverter
-from blendforge.blender_runtime.CustomMaterial import (create_mat, custom_load_CCmaterials,)
+from blendforge.blender_runtime.CustomMaterial import make_random_material
+from blendforge.blender_runtime.utils import (sample_pose_func_drop, sample_pose_func,)
 from blendforge.host.FiletoDict import Config
-
-# гарантируем видимость custom site-packages для Blender Python
-import site
-site.addsitedir('/home/nikita/blender/blender-3.5.1-linux-x64/custom-python-packages')
+from blendforge.blender_runtime.LolWriterUtility import write_lol_annotations
 
 from filelock import FileLock
 from mathutils import Vector, Euler
@@ -21,43 +19,6 @@ def parse_args(args):
     p = argparse.ArgumentParser(description='LOL-style generator via double render (target/input)')
     p.add_argument('--config_file', type=str, required=True)
     return p.parse_args(args)
-
-# ---------- позы ----------
-def sample_pose_func_drop(obj: bproc.types.MeshObject):
-    """Сваливаем объекты в небольшую «кучу» (цилиндр над полом)."""
-    radius = 0.12
-    z_min, z_max = 0.5, 1.0
-    theta = np.random.uniform(0, 2*np.pi)
-    r = np.random.uniform(0, radius)
-    x = r * np.cos(theta)
-    y = r * np.sin(theta)
-    z = np.random.uniform(z_min, z_max)
-    obj.set_location([x, y, z])
-    obj.set_rotation_euler(bproc.sampler.uniformSO3())
-
-def sample_pose_func(obj: bproc.types.MeshObject):
-    """Обычное разбрасывание в ограниченном объёме."""
-    mn = np.array([-0.3, -0.3, 0.1], np.float32)
-    mx = np.array([ 0.3,  0.3, 0.6], np.float32)
-    obj.set_location(np.random.uniform(mn, mx))
-    obj.set_rotation_euler(bproc.sampler.uniformSO3())
-
-# ---------- сохранение ----------
-def save_png(path, arr):
-    from PIL import Image
-    Image.init()
-    arr = np.ascontiguousarray(arr)
-    if arr.dtype != np.uint8:
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-    Image.fromarray(arr, mode='RGB').save(path, format='PNG', compress_level=4)
-
-def save_jpeg(path, arr, quality=85):
-    from PIL import Image
-    Image.init()
-    arr = np.ascontiguousarray(arr)
-    if arr.dtype != np.uint8:
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-    Image.fromarray(arr, mode='RGB').save(path, format='JPEG', quality=int(quality), subsampling=1, optimize=True)
 
 # ---------- MAIN ----------
 def main(args=None):
@@ -69,6 +30,13 @@ def main(args=None):
     args = parse_args(args)
     cfg = Config(args.config_file)
 
+    if cfg.max_amount_of_samples is None:
+        m_a_o_s = np.random.randint(300, 1024)
+        bproc.renderer.set_max_amount_of_samples(m_a_o_s)
+    else:
+        if not isinstance(cfg.max_amount_of_samples, int):
+            raise ValueError("max_amount_of_samples must be an integer.")
+        bproc.renderer.set_max_amount_of_samples(cfg.max_amount_of_samples)           
 
     # ---------- загрузка объектов (BOP) ----------
     sampled_objs = bproc.loader.load_bop_objs(
@@ -82,20 +50,6 @@ def main(args=None):
     )
     fx = float(K[0, 0]); fy = float(K[1, 1])
 
-    # ---------- Cycles детерминизм ----------
-    import bpy
-    bpy.context.scene.render.engine = 'CYCLES'
-    bpy.context.scene.cycles.use_adaptive_sampling = False
-    bpy.context.scene.cycles.samples = int(getattr(cfg, "max_amount_of_samples", 512) or 512)
-    bpy.context.scene.cycles.seed = 12345
-
-    # Color Management (фиксируем трансформ)
-    vs = bpy.context.scene.view_settings
-    vs.view_transform = str(getattr(cfg, "color_view_transform", "Filmic"))
-    vs.look = 'None'
-    vs.gamma = 1.0
-    vs.exposure = 0.0  # будем менять далее
-
     # ---------- комната ----------
     room_planes = [
         bproc.object.create_primitive('PLANE', scale=[3, 3, 1]),
@@ -108,11 +62,11 @@ def main(args=None):
         plane.enable_rigidbody(False, collision_shape='BOX', friction=100.0, linear_damping=0.99, angular_damping=0.99)
 
     # потолочная панель (мягкий свет)
-    light_plane = bproc.object.create_primitive('PLANE', scale=[1, 1, 1], location=[0, 0, 5])
+    light_plane = bproc.object.create_primitive('PLANE', scale=[1, 1, 1], location=[0, 0, 6.5])
     light_plane.set_name('light_plane')
     light_plane_material = bproc.material.create('light_material')
     light_plane_material.make_emissive(
-        emission_strength=np.random.uniform(3, 6),
+        emission_strength= np.random.uniform(0, 1),  # 3, 6
         emission_color=np.random.uniform([0.6, 0.6, 0.6, 1.0], [1.0, 1.0, 1.0, 1.0])
     )
     light_plane.replace_materials(light_plane_material)
@@ -133,8 +87,6 @@ def main(args=None):
     meta_f  = open(meta_path,  "a", encoding="utf-8")
 
     # ---------- параметры пар ----------
-    EV_LL_rng = getattr(cfg, "ev_low_range", [-4.0, -2.0])      # диапазон недоэкспозиции для input
-    EV_TARGET = 0.0                                             # таргет — базовая экспозиция
     EV_MODE   = str(getattr(cfg, "ev_mode", "camera")).lower()  # "camera" | "light"
     JPEG_Q    = getattr(cfg, "jpeg_input_quality", None)        # если None — PNG, иначе JPEG quality
 
@@ -146,11 +98,11 @@ def main(args=None):
         # точечный свет
         diap_tem = [3500, 6500]
         colour = [TemperatureToRGBConverter(tem) for tem in diap_tem]
-        base_energy = float(np.random.uniform(150, 1000))
+        #base_energy = float(np.random.uniform(650, 1000))
         light_point = bproc.types.Light()
-        light_point.set_energy(base_energy)
+        #light_point.set_energy(base_energy)
         light_point.set_color(np.random.uniform(colour[0], colour[1]))
-        location = bproc.sampler.shell(center=[0, 0, 4], radius_min=0.05, radius_max=1.0,
+        location = bproc.sampler.shell(center=[0, 0, 5], radius_min=0.05, radius_max=1.0,
                                        elevation_min=-1, elevation_max=1, uniform_volume=True)
         light_point.set_location(location)
 
@@ -167,9 +119,27 @@ def main(args=None):
         for j, obj in enumerate(sampled_objs):
             obj.enable_rigidbody(True, friction=100.0, linear_damping=0.99, angular_damping=0.99)
             obj.set_shading_mode('auto')
-            mat = create_mat(f"obj_{j:06d}")
-            for mi in range(len(obj.get_materials())):
-                obj.set_material(mi, mat)
+
+
+            mat, style = make_random_material(
+                allowed=["metal", 
+                         "dirty_metal", 
+                         "cast_iron", 
+                         "steel", 
+                         "brushed_steel", 
+                         "galvanized_steel", 
+                         "blackened_steel",],   
+                name_prefix=f"obj_{j:06d}"
+            )
+
+            # назначаем материал на все слоты объекта (или создаём слот, если пусто)
+            mats = obj.get_materials()
+            if not mats:
+                obj.set_material(0, mat)
+            else:
+                for i in range(len(mats)):
+                    obj.set_material(i, mat)
+
 
         bproc.object.simulate_physics_and_fix_final_poses(
             min_simulation_time=3, max_simulation_time=35,
@@ -209,19 +179,16 @@ def main(args=None):
             bproc.camera.add_camera_pose(cpose)
 
         # ----------- РЕНДЕР ПАРЫ -----------
+        hight_energy = float(np.random.uniform(cfg.dip_energy_hight[0], cfg.dip_energy_hight[1]))
+        low_energy =  float(np.random.uniform(cfg.dip_energy_low[0], cfg.dip_energy_low[1]))
+        
         # TARGET: базовая экспозиция/энергия
-        vs.exposure = EV_TARGET
-        light_point.set_energy(base_energy)
+        light_point.set_energy(hight_energy)
         data_target = bproc.renderer.render()   # список кадров
 
         # INPUT: недоэкспозиция
-        ev_ll = float(np.random.uniform(EV_LL_rng[0], EV_LL_rng[1]))
         if EV_MODE == "camera":
-            vs.exposure = ev_ll            # камерная недоэкспозиция
-            light_point.set_energy(base_energy)
-        else:
-            vs.exposure = EV_TARGET
-            light_point.set_energy(base_energy * (2.0 ** ev_ll))  # сценически темнее
+            light_point.set_energy(low_energy)
 
         data_input = bproc.renderer.render()
 
@@ -229,44 +196,22 @@ def main(args=None):
         ts = datetime.utcnow().isoformat()
         with FileLock(os.path.join(out_root, '.lock')):
             # обе выборки одной длины
-            for k, (img_in, img_tg) in enumerate(zip(data_input["colors"], data_target["colors"])):
-                stem = f"{r:04d}_{k:04d}"
-                # если хотим JPEG для input
-                if JPEG_Q is not None:
-                    in_name = f"{stem}.jpg"
-                    tg_name = f"{stem}.png"
-                else:
-                    in_name = f"{stem}.png"
-                    tg_name = f"{stem}.png"
+            write_lol_annotations(
+                output_root=out_root,
+                split=split,
+                input_colors=data_input["colors"],
+                target_colors=data_target["colors"],
+                jpeg_input_quality=JPEG_Q,                 # None => PNG, иначе JPEG
+                target_format="PNG",
+                append_to_existing_output=True,
+                file_prefix="",                            # глобальный счётчик
+                lock_path=None, # важнейшее для мультипроцесса
+                timestamp_utc=ts,
+                ev_mode=EV_MODE,
+                camera={"fx": fx, "fy": fy, "width": int(width), "height": int(height)},
+                render={"engine": "BlenderProc/Cycles", "samples": int(bpy.context.scene.cycles.samples)},
+            )
 
-                in_path = os.path.join(input_dir,  in_name)
-                tg_path = os.path.join(target_dir, tg_name)
-
-                if JPEG_Q is not None:
-                    save_jpeg(in_path, img_in, quality=JPEG_Q)
-                else:
-                    save_png(in_path, img_in)
-                save_png(tg_path, img_tg)
-
-                # pairs.txt
-                pairs_f.write(f"input/{in_name} target/{tg_name}\n")
-
-                # meta.jsonl
-                meta = {
-                    "id": stem,
-                    "timestamp_utc": ts,
-                    "domain": "sRGB",
-                    "EV_mode": EV_MODE,
-                    "EV_input": ev_ll,
-                    "EV_target": EV_TARGET,
-                    "camera": {"fx": fx, "fy": fy, "width": int(width), "height": int(height)},
-                    "render": {
-                        "engine": "BlenderProc/Cycles",
-                        "samples": int(bpy.context.scene.cycles.samples),
-                        "view_transform": vs.view_transform
-                    }
-                }
-                meta_f.write(json.dumps(meta, ensure_ascii=False) + "\n")
 
         light_point.delete()
         r += 1

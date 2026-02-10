@@ -33,6 +33,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+export OPENCV_IO_ENABLE_OPENEXR=1
+
 eval "$(scripts/bproc env)"
 
 python "runers/${RUNNER}" --config_path "${CONFIG}" "${EXTRA[@]}"

@@ -241,13 +241,6 @@ class Config:
             raise ValueError("Parameter 'split' must be one of ['train','val','test'].")
         self._data['split'] = split
 
-        # --- EV диапазон для input (low-light) ---
-        ev = self._data.get('ev_low_range', [-4.0, -2.0])
-        if (not isinstance(ev, (list, tuple)) or len(ev) != 2
-            or not all(isinstance(x, (int, float)) for x in ev) or ev[0] > ev[1]):
-            raise TypeError("Parameter 'ev_low_range' must be [minEV, maxEV] with numbers and min<=max.")
-        self._data['ev_low_range'] = [float(ev[0]), float(ev[1])]
-
         # --- число сцен и поз ---
         self._data['runs']      = int(self._data.get('runs', 1))
         self._data['poses_cam'] = int(self._data.get('poses_cam', 25))

@@ -1,5 +1,4 @@
 mode = "bop_lol"
-split = "train"           # "train" | "val" | "test"
 
 # ==== ПУТИ ====
 dataset_parent_path = "prepared"
@@ -15,25 +14,26 @@ output_dir_lol = "output/lol_data/"
 
 # ==== ПАРАМЕТРЫ РЕНДЕРА / СЦЕН ====
 poses_cam = 15      # поз на сцену
-runs      = 2      # количество сцен 
+runs      = 2000      # количество сцен 
+num_gpus = 1
+parallel_process_on_one_gpu = 2
 
-# диап. затемнения входа (EV для input); случайное значение берётся из диапазона
-ev_low_range = [-4.0, -2.0]
+split = "train"           # "train" | "val" | "test"
+
+# диап энергий 
+dip_energy_low = [2, 20]
+dip_energy_hight = [600, 1200]
 
 # max samples на кадр (None => случайно 300..1000 внутри скрипта)
 max_amount_of_samples = None
 
 # Вероятность «свалки» (drop-посадка объектов в кучу)
-probability_drop = 0.70
+probability_drop = 0.50
 
 # ==== ПРОЧЕЕ / ОРКЕСТРАЦИЯ ====
 save_config = True
-num_gpus = 1
-parallel_process_on_one_gpu = 2
 index_device = 0
 process_id = 0
 
-ev_mode = "camera"           # или "light"
-jpeg_input_quality = 85      # опционально, иначе PNG
-color_view_transform = "Filmic"  # или "Standard"
+ev_mode = "camera"
 

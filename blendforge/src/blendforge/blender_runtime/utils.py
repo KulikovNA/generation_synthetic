@@ -1,3 +1,4 @@
+import blenderproc as bproc
 import numpy as np
 import bpy
 import os
@@ -5,7 +6,27 @@ from typing import List, Dict, Tuple
 
 from blenderproc.python.types.MeshObjectUtility import MeshObject
 
-import bmesh
+import bmesh 
+
+# ---------- позы ----------
+def sample_pose_func_drop(obj: bproc.types.MeshObject):
+    """Сваливаем объекты в небольшую «кучу» (цилиндр над полом)."""
+    radius = 0.12
+    z_min, z_max = 0.5, 1.0
+    theta = np.random.uniform(0, 2*np.pi)
+    r = np.random.uniform(0, radius)
+    x = r * np.cos(theta)
+    y = r * np.sin(theta)
+    z = np.random.uniform(z_min, z_max)
+    obj.set_location([x, y, z])
+    obj.set_rotation_euler(bproc.sampler.uniformSO3())
+
+def sample_pose_func(obj: bproc.types.MeshObject):
+    """Обычное разбрасывание в ограниченном объёме."""
+    mn = np.array([-0.3, -0.3, 0.1], np.float32)
+    mx = np.array([ 0.3,  0.3, 0.6], np.float32)
+    obj.set_location(np.random.uniform(mn, mx))
+    obj.set_rotation_euler(bproc.sampler.uniformSO3())
 
 def collect_fragments_canonical_gt(
         new_mesh_objects: List[MeshObject],
