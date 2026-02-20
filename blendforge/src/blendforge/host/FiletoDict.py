@@ -270,7 +270,12 @@ class Config:
         self._data['output_dir_lol'] = str(Path(out_lol).resolve())
 
 
-
+    def _mode_is_seg_with_depth(self)->None:
+        print(self._data)
+        if self._data['dataset_parent_path']:
+            self._data['dataset_parent_path'] = self._get_absolute_path(self._data['dataset_parent_path'])
+            #self._data['output_dir'] = self._get_absolute_path(self._data['output_dir'])
+        else: raise ValueError("dataset_parent_path не может быть пустым")
 
     def _mode_is_bop_seg(self) -> None:
         print(self._data)

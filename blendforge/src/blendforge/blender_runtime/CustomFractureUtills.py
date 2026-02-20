@@ -119,41 +119,43 @@ def fracture_object_with_cell(
             bpy_obj.modifiers.remove(mod)
 
     if success:
-        # category_id исходного объекта (из имени вида obj_000001)
         obj_id = int(obj_name.split("_")[-1])
 
-        # Уникальный тег фрактурирования для ЭТОГО объекта в ЭТОМ запуске
-        fracture_tag = uuid.uuid4().hex[:8]  # например "3a9b7c2f"
+        # id разлома (группировка фрагментов одного исходника)
+        fracture_uid = uuid.uuid4().hex[:8]
 
-        for local_idx, cur_obj in enumerate(final_shards):
-            # 1) Имя фрагмента: включает исходный obj_name + fracture_tag + локальный индекс
-            new_name = f"{obj_name}_fx{fracture_tag}_frag_{local_idx:03d}"
+        # (опционально, но полезно) делаем порядок детерминированным
+        # чтобы fragment_id был стабильным внутри одного запуска
+        final_shards = sorted(final_shards, key=lambda o: o.blender_obj.name)
+
+        for local_idx, cur_obj in enumerate(final_shards, start=1):  # 1..N
+            new_name = f"{obj_name}_fx{fracture_uid}_frag_{local_idx:03d}"
             cur_obj.blender_obj.name = new_name
 
-            # 2) Материал
             mats = cur_obj.get_materials()
             if mats:
                 mats[-1].set_name("vertex_col_material")
 
-            # 3) Масштаб
             if scale is not None:
                 cur_obj.set_scale(Vector((scale, scale, scale)))
 
-            # 4) category_id для BOP
+            # класс исходного объекта
             cur_obj.set_cp("category_id", obj_id)
 
-            # 5) Доп. CP под пазл
-            cur_obj.set_cp("fragment_local_idx", local_idx)
-            cur_obj.set_cp("parent_name", obj_name)
-            cur_obj.set_cp("parent_category_id", obj_id)
-            cur_obj.set_cp("fracture_tag", fracture_tag)
+            # локальный id фрагмента (1..N)
+            cur_obj.set_cp("fragment_id", local_idx)
+
+            # метаданные разлома
+            cur_obj.set_cp("fracture_uid", fracture_uid)
+            cur_obj.set_cp("fracture_seed", seed)
+            cur_obj.set_cp("fracture_method", "voronoi")
 
         # Удаляем исходный объект
         if obj_name in bpy.context.scene.objects:
             print(f"Удаление исходного объекта: {obj_name}")
             bpy.data.objects.remove(bpy.data.objects[obj_name], do_unlink=True)
 
-        print(f"Фрактурирование объекта {obj_name} завершено, fracture_tag={fracture_tag}.")
+        print(f"Фрактурирование объекта {obj_name} завершено, fracture_tag={fracture_uid}.")
     else:
         print(f"Не удалось адекватно сфрактурировать {obj_name} после {max_attempts} попыток.")
         for obj in new_objects:

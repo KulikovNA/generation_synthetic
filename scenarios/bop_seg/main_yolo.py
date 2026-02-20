@@ -14,7 +14,7 @@ from blendforge.blender_runtime.utils import update_data
 from blendforge.blender_runtime.CustomMaterial import make_random_material
 from blendforge.blender_runtime.CustomLoadMesh import load_objs
 from blendforge.host.FiletoDict import Config
-from blendforge.blender_runtime.YoloWriterUtility import write_yolo_annotations
+from blendforge.blender_runtime.writer.YoloWriterUtility import write_yolo_annotations
 
 from filelock import FileLock
 from mathutils import Matrix, Vector, Euler

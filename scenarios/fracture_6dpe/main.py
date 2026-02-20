@@ -19,7 +19,7 @@ from mathutils import Vector, Euler
 from addon_utils import enable
 
 # наш кастомный BOP writer
-from blendforge.blender_runtime.CustomBopShapeWriterUtility import (
+from blendforge.blender_runtime.writer.CustomBopShapeWriterUtility import (
     write_bop as write_bop_shape,
     _BopWriterUtility,   # используем его статические методы для json
 )

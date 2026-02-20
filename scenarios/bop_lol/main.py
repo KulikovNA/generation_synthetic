@@ -9,7 +9,7 @@ from blendforge.blender_runtime.CustomLightSetting import TemperatureToRGBConver
 from blendforge.blender_runtime.CustomMaterial import make_random_material
 from blendforge.blender_runtime.utils import (sample_pose_func_drop, sample_pose_func,)
 from blendforge.host.FiletoDict import Config
-from blendforge.blender_runtime.LolWriterUtility import write_lol_annotations
+from blendforge.blender_runtime.writer.LolWriterUtility import write_lol_annotations
 
 from filelock import FileLock
 from mathutils import Vector, Euler

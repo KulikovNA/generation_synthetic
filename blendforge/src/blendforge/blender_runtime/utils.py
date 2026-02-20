@@ -5,8 +5,26 @@ import os
 from typing import List, Dict, Tuple
 
 from blenderproc.python.types.MeshObjectUtility import MeshObject
-
+import math
 import bmesh 
+from mathutils import Vector, Euler
+
+# -------------------- pose helpers --------------------
+
+def build_lookat_pose_cam(cam_loc: np.ndarray, poi: np.ndarray, rotation_factor: float = 9.0) -> np.ndarray:
+    forward = poi - cam_loc
+    dist = float(np.linalg.norm(forward))
+    look_quat = Vector(forward).to_track_quat("-Z", "Y")
+    R = look_quat.to_matrix()
+
+    max_angle_deg = rotation_factor * dist
+    rx = math.radians(float(np.random.uniform(-max_angle_deg, max_angle_deg)))
+    ry = math.radians(float(np.random.uniform(-max_angle_deg, max_angle_deg)))
+    rz = math.radians(float(np.random.uniform(-max_angle_deg, max_angle_deg)))
+    R @= Euler((rx, ry, rz), "XYZ").to_matrix()
+
+    return bproc.math.build_transformation_mat(cam_loc, np.array(R))
+
 
 # ---------- позы ----------
 def sample_pose_func_drop(obj: bproc.types.MeshObject):
