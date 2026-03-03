@@ -382,7 +382,7 @@ def main(argv=None):
             f"rectify_use_distortion={rectify_use_distortion}"
         )
 
-        # ---------------------------------------------------------------------
+        # --------------------- ------------------------------------------------
         # MATCH: RECTIFY ONLY -> depth_rect_m + disp_rect_px (IR_LEFT_RECT grid)
         # ---------------------------------------------------------------------
         depth_rect_m, disp_rect_px = stereo_global_matching_rectified(
@@ -465,6 +465,7 @@ def main(argv=None):
             depth_gt_rgb_m=depth_gt_rgb_m,                 # COLOR grid
             disp_rect_px=disp_rect_px,                     # IR_LEFT_RECT grid
             save_disp_png=False,
+            depth_save_mode="heatmap"
         )
 
     finally:

@@ -1,7 +1,13 @@
+from __future__ import annotations
+
 import os
-import numpy as np
+from typing import Literal, Optional, Sequence
+
 import cv2
-from typing import Optional, Sequence
+import numpy as np
+
+
+DepthSaveMode = Literal["u16", "heatmap"]
 
 
 def save_rgb_ir_stereo_rectified(
@@ -25,22 +31,35 @@ def save_rgb_ir_stereo_rectified(
     disp_rect_px: Optional[Sequence[np.ndarray]] = None,
     save_disp_png: bool = False,
 
+    # --- depth save mode ---
+    depth_save_mode: DepthSaveMode = "u16",
+
     # naming
-    start_index: int = 0,     # если хочешь продолжать нумерацию
+    start_index: int = 0,
 ):
     """
     Saves always:
       rgb/000000.{rgb_ext}
       ir_left/000000.png
       ir_right/000000.png
-      depth_ir_left_rect/000000.png          (u16) depth in rectified IR_LEFT grid
-      depth_color_from_ir_rect/000000.png    (u16) depth aligned into COLOR grid
 
-    Saves optionally:
-      depth_gt_rgb/000000.png                (u16) GT depth aligned to COLOR grid
-      disp_rect_npy/000000.npy               (float32 disparity)
-      disp_rect_vis/000000.png               (u8 visualization, if save_disp_png=True)
+    Depth folders (same folders, mode-dependent):
+      depth_ir_left_rect/000000.png
+      depth_color_from_ir_rect/000000.png
+      depth_gt_rgb/000000.png   (if provided)
+
+    If depth_save_mode == "u16":
+      - saves uint16 depth PNG (metric depth)
+    If depth_save_mode == "heatmap":
+      - saves color heatmap PNG (uint8 BGR), invalid=black
+
+    Disparity optionally:
+      disp_rect_npy/000000.npy
+      disp_rect_vis/000000.png  (if save_disp_png=True)
     """
+
+    if depth_save_mode not in ("u16", "heatmap"):
+        raise ValueError(f"Unknown depth_save_mode: {depth_save_mode}")
 
     n = len(data_rgbs)
 
@@ -93,17 +112,29 @@ def save_rgb_ir_stereo_rectified(
         _save_gray_u8(os.path.join(output_dir, "ir_right", f"{name}.png"), data_ir_rights[k])
 
         # depth rectified IR_LEFT grid
-        d_ir_u16 = meters_to_depth_u16(depth_ir_left_rect_m[k], depth_scale_mm)
-        _save_png_u16(os.path.join(output_dir, "depth_ir_left_rect", f"{name}.png"), d_ir_u16)
+        _save_depth(
+            os.path.join(output_dir, "depth_ir_left_rect", f"{name}.png"),
+            depth_ir_left_rect_m[k],
+            depth_scale_mm=depth_scale_mm,
+            mode=depth_save_mode,
+        )
 
         # depth aligned into COLOR grid
-        d_rgb_u16 = meters_to_depth_u16(depth_color_from_ir_rect_m[k], depth_scale_mm)
-        _save_png_u16(os.path.join(output_dir, "depth_color_from_ir_rect", f"{name}.png"), d_rgb_u16)
+        _save_depth(
+            os.path.join(output_dir, "depth_color_from_ir_rect", f"{name}.png"),
+            depth_color_from_ir_rect_m[k],
+            depth_scale_mm=depth_scale_mm,
+            mode=depth_save_mode,
+        )
 
         # GT (optional)
         if depth_gt_rgb_m is not None:
-            gt_u16 = meters_to_depth_u16(depth_gt_rgb_m[k], depth_scale_mm)
-            _save_png_u16(os.path.join(output_dir, "depth_gt_rgb", f"{name}.png"), gt_u16)
+            _save_depth(
+                os.path.join(output_dir, "depth_gt_rgb", f"{name}.png"),
+                depth_gt_rgb_m[k],
+                depth_scale_mm=depth_scale_mm,
+                mode=depth_save_mode,
+            )
 
         # disparity (optional)
         if disp_rect_px is not None:
@@ -172,6 +203,27 @@ def _save_png_u16(path: str, arr: np.ndarray) -> None:
     cv2.imwrite(path, arr)
 
 
+def _save_depth(
+    path: str,
+    depth_m: np.ndarray,
+    *,
+    depth_scale_mm: float,
+    mode: DepthSaveMode,
+) -> None:
+    if mode == "u16":
+        depth_u16 = meters_to_depth_u16(depth_m, depth_scale_mm)
+        _save_png_u16(path, depth_u16)
+        return
+
+    if mode == "heatmap":
+        heat = depth_to_heatmap(depth_m)
+        _ensure_dir(os.path.dirname(path))
+        cv2.imwrite(path, heat)
+        return
+
+    raise ValueError(f"Unknown depth save mode: {mode}")
+
+
 def meters_to_depth_u16(depth_m: np.ndarray, depth_scale_mm: float = 1.0) -> np.ndarray:
     """
     BOP-compatible:
@@ -189,6 +241,46 @@ def meters_to_depth_u16(depth_m: np.ndarray, depth_scale_mm: float = 1.0) -> np.
     scaled = depth_mm / float(depth_scale_mm)
     scaled = np.clip(scaled, 0.0, 65535.0)
     return (scaled + 0.5).astype(np.uint16)
+
+
+def depth_to_heatmap(
+    depth_m: np.ndarray,
+    *,
+    far_quantile: float = 0.99,
+) -> np.ndarray:
+    """
+    Convert depth [m] to heatmap preview.
+
+    - invalid = black
+    - near = hot
+    - far = cold
+
+    Returns uint8 BGR image, ready for cv2.imwrite.
+    """
+    d = np.asarray(depth_m, dtype=np.float32).copy()
+    if d.ndim != 2:
+        raise ValueError(f"depth_m must be [H,W], got {d.shape}")
+
+    d[~np.isfinite(d)] = 0.0
+    valid = d > 0.0
+
+    if not np.any(valid):
+        return np.zeros((d.shape[0], d.shape[1], 3), dtype=np.uint8)
+
+    q = float(np.clip(far_quantile, 0.5, 1.0))
+    z_far = float(np.quantile(d[valid], q))
+    z_far = max(z_far, 1e-6)
+
+    # near -> 1, far -> 0
+    norm = np.zeros_like(d, dtype=np.float32)
+    norm[valid] = 1.0 - np.clip(d[valid] / z_far, 0.0, 1.0)
+
+    gray = (norm * 255.0 + 0.5).astype(np.uint8)
+    gray[~valid] = 0
+
+    heat = cv2.applyColorMap(gray, cv2.COLORMAP_TURBO)
+    heat[~valid] = 0
+    return heat
 
 
 def _disp_to_u8_vis(disp: np.ndarray) -> np.ndarray:
