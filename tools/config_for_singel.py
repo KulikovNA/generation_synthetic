@@ -10,4 +10,4 @@ probability_drop = 0.5                             # вероятность ре
 
 max_amount_of_samples = 50                        # Cycles samples (int) или null для random
 
-cc_textures = dict(cc_textures_path = "/home/nikita/data_generator/generation_dataset/generation_synthetic/resources/textures_2k_plate")   # путь к CCTextures (폴ки материалов)
+cc_textures = dict(cc_textures_path = "/home/nikita/data_generator/generation_dataset/generation_synthetic/resources/textures_2k_plate")   # путь к CCTextures

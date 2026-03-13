@@ -1,4 +1,3 @@
-# stereo/StereoPipline.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +64,13 @@ def _build_matcher_params(
     depth_completion: bool = False,
     border_pad: bool = True,
     pad_left: Optional[int] = None,
+    # SGBM advanced
+    sgbm_mode: int = cv2.STEREO_SGBM_MODE_HH,
+    uniqueness_ratio: int = 10,
+    disp12_max_diff: int = 1,
+    pre_filter_cap: int = 63,
+    p1_scale: float = 8.0,
+    p2_scale: float = 32.0,
 ) -> StereoMatcherParams:
     p = StereoMatcherParams(
         depth_range_policy=depth_range_policy,
@@ -82,7 +88,13 @@ def _build_matcher_params(
         depth_completion=depth_completion,
         border_pad=border_pad,
         pad_left=pad_left,
-        sgbm_mode=cv2.STEREO_SGBM_MODE_HH,
+
+        sgbm_mode=sgbm_mode,
+        uniqueness_ratio=uniqueness_ratio,
+        disp12_max_diff=disp12_max_diff,
+        pre_filter_cap=pre_filter_cap,
+        p1_scale=p1_scale,
+        p2_scale=p2_scale,
     )
     p.validate()
     return p
@@ -111,6 +123,13 @@ def stereo_depth_from_rectified_pair(
     depth_completion: bool = False,
     border_pad: bool = True,
     pad_left: Optional[int] = None,
+    # SGBM advanced
+    sgbm_mode: int = cv2.STEREO_SGBM_MODE_HH,
+    uniqueness_ratio: int = 10,
+    disp12_max_diff: int = 1,
+    pre_filter_cap: int = 63,
+    p1_scale: float = 8.0,
+    p2_scale: float = 32.0,
     geom_mask_rect: Optional[np.ndarray] = None,  # in rectified grid, before padding
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -151,6 +170,12 @@ def stereo_depth_from_rectified_pair(
         depth_completion=depth_completion,
         border_pad=border_pad,
         pad_left=pad_left,
+        sgbm_mode=sgbm_mode,
+        uniqueness_ratio=uniqueness_ratio,
+        disp12_max_diff=disp12_max_diff,
+        pre_filter_cap=pre_filter_cap,
+        p1_scale=p1_scale,
+        p2_scale=p2_scale,
     )
 
     dmin = float(max(depth_min, 0.0))
@@ -193,6 +218,8 @@ def stereo_depth_from_rectified_pair(
         sgbm_speckle_range=params.speckle_range,
         disp12_max_diff=params.disp12_max_diff,
         pre_filter_cap=params.pre_filter_cap,
+        p1_scale=params.p1_scale,
+        p2_scale=params.p2_scale,
     )
 
     dispL = sanitize_disparity(dispL)
@@ -230,7 +257,7 @@ def stereo_depth_from_rectified_pair(
             )
             if geom_mask_p is not None:
                 disp_work[~geom_mask_p] = 0.0
-        # else: silently fallback to raw dispL (как и раньше)
+        # else: silently fallback to raw dispL
 
     # apply LR mask
     disp_work[~mask_lr] = 0.0
@@ -316,6 +343,13 @@ def stereo_global_matching_rectified(
     fill_mode: FillMode = "none",
     fill_iters: int = 0,
     depth_completion: bool = False,
+    # SGBM advanced
+    sgbm_mode: int = cv2.STEREO_SGBM_MODE_HH,
+    uniqueness_ratio: int = 10,
+    disp12_max_diff: int = 1,
+    pre_filter_cap: int = 63,
+    p1_scale: float = 8.0,
+    p2_scale: float = 32.0,
     # optional physical overlap mask from GT depth (IR_LEFT render depth)
     depth_gt_frames: Optional[List[np.ndarray]] = None,  # ORIGINAL left grid
     use_geom_mask_from_gt: bool = True,
@@ -413,6 +447,12 @@ def stereo_global_matching_rectified(
             fill_mode=fill_mode,
             fill_iters=fill_iters,
             depth_completion=depth_completion,
+            sgbm_mode=sgbm_mode,
+            uniqueness_ratio=uniqueness_ratio,
+            disp12_max_diff=disp12_max_diff,
+            pre_filter_cap=pre_filter_cap,
+            p1_scale=p1_scale,
+            p2_scale=p2_scale,
             border_pad=border_pad,
             pad_left=pad_left,
             geom_mask_rect=geom_mask_rect,

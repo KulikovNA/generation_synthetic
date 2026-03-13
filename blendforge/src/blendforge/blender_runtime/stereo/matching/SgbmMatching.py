@@ -1,4 +1,3 @@
-#stereo/matching/SgbmMatching.py
 from __future__ import annotations
 
 from typing import Any, Tuple
@@ -30,16 +29,26 @@ def create_sgbm(
     speckle_range: int = 2,
     disp12_max_diff: int = 1,
     pre_filter_cap: int = 63,
+    p1_scale: float = 8.0,
+    p2_scale: float = 32.0,
 ) -> cv2.StereoSGBM:
     block_size = int(block_size)
     if block_size % 2 == 0:
         raise ValueError("block_size must be odd.")
     if num_disparities <= 0 or num_disparities % 16 != 0:
         raise ValueError("num_disparities must be >0 and divisible by 16.")
+    if float(p1_scale) <= 0:
+        raise ValueError("p1_scale must be > 0.")
+    if float(p2_scale) <= 0:
+        raise ValueError("p2_scale must be > 0.")
+    if float(p2_scale) <= float(p1_scale):
+        raise ValueError("p2_scale must be > p1_scale.")
 
     cn = 1  # grayscale
-    P1 = 8 * cn * (block_size ** 2)
-    P2 = 32 * cn * (block_size ** 2)
+
+    # decoupled regularization
+    P1 = max(1, int(round(float(p1_scale) * cn * (block_size ** 2))))
+    P2 = max(P1 + 1, int(round(float(p2_scale) * cn * (block_size ** 2))))
 
     return cv2.StereoSGBM_create(
         minDisparity=int(min_disparity),
@@ -69,6 +78,8 @@ def compute_sgbm_disparities(
     sgbm_speckle_range: int = 2,
     disp12_max_diff: int = 1,
     pre_filter_cap: int = 63,
+    p1_scale: float = 8.0,
+    p2_scale: float = 32.0,
 ) -> Tuple[Any, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute left/right SGBM disparities.
@@ -95,6 +106,8 @@ def compute_sgbm_disparities(
         speckle_range=sgbm_speckle_range,
         disp12_max_diff=disp12_max_diff,
         pre_filter_cap=pre_filter_cap,
+        p1_scale=p1_scale,
+        p2_scale=p2_scale,
     )
 
     dispL_i16 = matcher_left.compute(left_u8, right_u8)
