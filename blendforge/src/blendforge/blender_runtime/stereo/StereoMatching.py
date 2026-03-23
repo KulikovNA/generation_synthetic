@@ -2,15 +2,11 @@
 from __future__ import annotations
 
 """
-Compatibility facade for stereo matching.
+Legacy compatibility facade for stereo matching.
 
-Основная логика вынесена в StereoPipline.py (оркестрация),
-а также в подмодули:
-- matching/
-- filters/
-- masks/
-- utils/
-- types/
+Current effective/random paths should import the public API directly from
+StereoPipline.py. This module stays only to avoid breaking older callers such as
+the old single_depth_gen branch and calibration/debug scripts.
 """
 
 from typing import Optional

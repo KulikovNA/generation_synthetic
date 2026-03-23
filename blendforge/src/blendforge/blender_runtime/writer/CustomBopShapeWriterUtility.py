@@ -329,29 +329,14 @@ class _BopWriterUtility:
     @staticmethod
     def save_json(path, content):
         """Saves the content to a JSON file in a human-friendly format."""
-        text = ""
         with open(path, 'w', encoding="utf-8") as file:
-            if isinstance(content, dict):
-                text += '{\n'
-                content_sorted = sorted(content.items(), key=lambda x: x[0])
-                for elem_id, (k, v) in enumerate(content_sorted):
-                    text += f'  "{k}": {json.dumps(v, sort_keys=True)}'
-                    if elem_id != len(content) - 1:
-                        text += ','
-                    text += '\n'
-                text += '}'
-                file.write(text)
-            elif isinstance(content, list):
-                text += '[\n'
-                for elem_id, elem in enumerate(content):
-                    text += f'  {json.dumps(elem, sort_keys=True)}'
-                    if elem_id != len(content) - 1:
-                        text += ','
-                    text += '\n'
-                text += ']'
-                file.write(text)
-            else:
-                json.dump(content, file, sort_keys=True)
+            json.dump(
+                content,
+                file,
+                sort_keys=True,
+                indent=2,
+                ensure_ascii=False,
+            )
 
     @staticmethod
     def save_depth(path: str, im: np.ndarray):
@@ -1014,7 +999,7 @@ class _BopWriterUtility:
                 )
 
             misc.ensure_dir(os.path.dirname(info_path))
-            inout.save_json(info_path, scene_gt_info)
+            _BopWriterUtility.save_json(info_path, scene_gt_info)
 
     @staticmethod
     def calc_gt_coco(
@@ -1136,5 +1121,4 @@ class _BopWriterUtility:
 
                     segmentation_id += 1
 
-            with open(coco_path, 'w', encoding='utf-8') as output_json_file:
-                json.dump(coco_scene_output, output_json_file)
+            _BopWriterUtility.save_json(coco_path, coco_scene_output)

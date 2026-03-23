@@ -11,3 +11,12 @@ probability_drop = 0.5                             # вероятность ре
 max_amount_of_samples = 50                        # Cycles samples (int) или null для random
 
 cc_textures = dict(cc_textures_path = "/home/nikita/data_generator/generation_dataset/generation_synthetic/resources/textures_2k_plate")   # путь к CCTextures
+
+effective_projector_render = dict(
+    projector_energy_range=[50.0, 150.0],  # absolute projector energy
+    ir_light_energy_range=[150.0, 250.0],    # absolute scene point-light energy for IR renders
+)
+
+rgb_render = dict(
+    light_energy_range=[300.0, 800.0],  # absolute scene point-light energy for RGB render
+)

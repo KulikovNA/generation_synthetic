@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+"""
+Legacy debug writer used by the old single_depth_gen branch.
+
+Current effective/random data-generation scripts save their own focused debug
+artifacts and do not depend on this helper.
+"""
+
 import os
 from typing import Literal, Optional, Sequence
 

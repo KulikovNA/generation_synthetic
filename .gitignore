@@ -9,6 +9,14 @@ examples/
 **/prepared/
 **/output/
 **/examples/
+**/output_full/
+**/output_texture/
+**/output_top/
+**/debug_compare_01/
+**/realsense_dump/
+**/render_projector_wall_pair/
+**/wall_capture/
+
 
 # Blender / BlenderProc temp & cache
 /tmp/

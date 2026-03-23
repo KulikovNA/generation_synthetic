@@ -6,6 +6,9 @@
 """
 Utilities for evaluating predicted depth maps against ground-truth depth.
 
+This module is kept as a legacy/debug evaluation helper. The current
+effective/random generator scripts do not depend on it directly.
+
 Main idea:
 - invalid / missing pixels are evaluated separately from numeric depth error;
 - numeric metrics are computed only on overlap of valid GT and valid prediction;

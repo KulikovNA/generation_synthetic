@@ -8,6 +8,7 @@ import sys
 import argparse
 import numpy as np
 import cv2
+import bpy
 
 from blendforge.host.FiletoDict import Config
 from blendforge.blender_runtime.CustomLightSetting import TemperatureToRGBConverter
@@ -24,10 +25,16 @@ from blendforge.blender_runtime.camera.RealsenseProjectorUtility import (
     get_or_create_mount_empty,
     animate_mount_from_cam2world,
     create_realsense_ir_projector,
+    resolve_projector_target,
 )
 
 # Stereo matching (RECTIFY ALWAYS) - фасад, внутри уже новый модульный pipeline
 from blendforge.blender_runtime.stereo.StereoMatching import stereo_global_matching_rectified
+from blendforge.blender_runtime.stereo.ActiveStereoIRUtility import (
+    build_rectify_from_rs as _shared_build_rectify_from_rs,
+    convert_ir_frames_to_intensity as _shared_convert_ir_frames_to_intensity,
+    rgb_to_intensity_u8 as _shared_rgb_to_intensity_u8,
+)
 
 # (необязательно) если хочешь явно создавать серии с метаданными сетки до матчинга
 # from blendforge.blender_runtime.stereo.FrameSeries import FrameSeries, FrameGrid
@@ -67,43 +74,7 @@ def _build_rectify_from_rs(
     *,
     use_distortion: bool = False,
 ):
-    """
-    Build OpenCV stereoRectify inputs (CV optical convention).
-
-    В Blender/Cycles линзовая дисторсия обычно НЕ симулируется -> use_distortion=False.
-    """
-    sL = rs.get_stream(left)
-    sR = rs.get_stream(right)
-
-    K1 = np.asarray(sL.K, dtype=np.float64)
-    K2 = np.asarray(sR.K, dtype=np.float64)
-
-    if use_distortion:
-        D1 = _np5(getattr(sL, "distortion_coeffs", [0, 0, 0, 0, 0]))
-        D2 = _np5(getattr(sR, "distortion_coeffs", [0, 0, 0, 0, 0]))
-    else:
-        D1 = np.zeros(5, dtype=np.float64)
-        D2 = np.zeros(5, dtype=np.float64)
-
-    # T_color_from_left / T_color_from_right in CV convention
-    T_c_l = np.asarray(rs.get_T_cv(left, "COLOR"), dtype=np.float64)
-    T_c_r = np.asarray(rs.get_T_cv(right, "COLOR"), dtype=np.float64)
-
-    # Right-from-left (CV): T_r_l = inv(T_c_r) @ T_c_l
-    T_r_l = np.linalg.inv(T_c_r) @ T_c_l
-    R = T_r_l[:3, :3].copy()
-    t = T_r_l[:3, 3].copy()
-
-    return {
-        "K_left": K1,
-        "D_left": D1,
-        "K_right": K2,
-        "D_right": D2,
-        "R": R,
-        "t": t,
-        "alpha": 0.0,
-        "image_size": (int(sL.width), int(sL.height)),  # (W,H)
-    }
+    return _shared_build_rectify_from_rs(rs, left=left, right=right, use_distortion=use_distortion)
 
 
 # -------------------- scene helpers --------------------
@@ -156,7 +127,107 @@ def _build_room_and_lights(cfg):
             uniform_volume=True,
         )
     )
-    return light_point
+    return light_point, light_plane_material
+
+
+def _get_ir_render_value(cfg, key: str, default):
+    ir_cfg = getattr(cfg, "ir_render", None)
+    if ir_cfg is None:
+        return default
+    return getattr(ir_cfg, key, default)
+
+
+def _get_ir_render_config(cfg) -> dict:
+    return {
+        "enabled": bool(_get_ir_render_value(cfg, "enabled", True)),
+        "environment_scale": float(_get_ir_render_value(cfg, "environment_scale", 0.15)),
+        "point_light_scale": float(_get_ir_render_value(cfg, "point_light_scale", 0.15)),
+        "emissive_scale": float(_get_ir_render_value(cfg, "emissive_scale", 0.15)),
+        "rgb_to_intensity_mode": str(_get_ir_render_value(cfg, "rgb_to_intensity_mode", "bt601")),
+    }
+
+
+def _find_node_input(node, socket_name: str):
+    for sock in node.inputs:
+        if sock.name == socket_name:
+            return sock
+    return None
+
+
+def _iter_world_background_nodes():
+    world = getattr(bpy.context.scene, "world", None)
+    if world is None or not getattr(world, "use_nodes", False) or world.node_tree is None:
+        return []
+    return [node for node in world.node_tree.nodes if node.type == "BACKGROUND"]
+
+
+def _iter_material_emission_nodes(material):
+    mat = getattr(material, "blender_obj", material)
+    if mat is None or not getattr(mat, "use_nodes", False) or mat.node_tree is None:
+        return []
+    return [node for node in mat.node_tree.nodes if node.type == "EMISSION"]
+
+
+def _capture_render_lighting_state(light_point, emissive_material) -> dict:
+    point_light_obj = getattr(light_point, "blender_obj", None)
+    point_energy = None if point_light_obj is None else float(point_light_obj.data.energy)
+
+    world_strengths = []
+    for node in _iter_world_background_nodes():
+        sock = _find_node_input(node, "Strength")
+        if sock is not None:
+            world_strengths.append((sock, float(sock.default_value)))
+
+    emissive_strengths = []
+    for node in _iter_material_emission_nodes(emissive_material):
+        sock = _find_node_input(node, "Strength")
+        if sock is not None:
+            emissive_strengths.append((sock, float(sock.default_value)))
+
+    return {
+        "point_light_obj": point_light_obj,
+        "point_energy": point_energy,
+        "world_strengths": world_strengths,
+        "emissive_strengths": emissive_strengths,
+    }
+
+
+def _apply_ir_lighting_state(state: dict, ir_cfg: dict):
+    point_scale = max(0.0, float(ir_cfg["point_light_scale"]))
+    env_scale = max(0.0, float(ir_cfg["environment_scale"]))
+    emissive_scale = max(0.0, float(ir_cfg["emissive_scale"]))
+
+    point_light_obj = state.get("point_light_obj")
+    point_energy = state.get("point_energy")
+    if point_light_obj is not None and point_energy is not None:
+        point_light_obj.data.energy = float(point_energy) * point_scale
+
+    for sock, base_value in state.get("world_strengths", []):
+        sock.default_value = float(base_value) * env_scale
+
+    for sock, base_value in state.get("emissive_strengths", []):
+        sock.default_value = float(base_value) * emissive_scale
+
+
+def _restore_render_lighting_state(state: dict):
+    point_light_obj = state.get("point_light_obj")
+    point_energy = state.get("point_energy")
+    if point_light_obj is not None and point_energy is not None:
+        point_light_obj.data.energy = float(point_energy)
+
+    for sock, base_value in state.get("world_strengths", []):
+        sock.default_value = float(base_value)
+
+    for sock, base_value in state.get("emissive_strengths", []):
+        sock.default_value = float(base_value)
+
+
+def _rgb_to_intensity_u8(img: np.ndarray, mode: str = "bt601") -> np.ndarray:
+    return _shared_rgb_to_intensity_u8(img, mode=mode)
+
+
+def _convert_ir_frames_to_intensity(frames, mode: str):
+    return _shared_convert_ir_frames_to_intensity(frames, mode=mode)
 
 
 def _prepare_objects(cfg):
@@ -229,10 +300,7 @@ def _build_rig_poses(cfg, rs: RealSenseProfile):
 
 
 def _pick_mount_poses(rs: RealSenseProfile, rig_poses_ir_left, rig_poses_ir_right, rig_poses_color):
-    mount_frame = "IR_LEFT"
-    if hasattr(rs, "has_projector") and rs.has_projector():
-        if hasattr(rs, "get_projector_mount_frame"):
-            mount_frame = rs.get_projector_mount_frame()
+    mount_frame = rs.get_projector_mount_frame() if rs.has_projector() else "IR_LEFT"
 
     if mount_frame in ("IR_LEFT", "DEPTH"):
         return rig_poses_ir_left
@@ -241,6 +309,70 @@ def _pick_mount_poses(rs: RealSenseProfile, rig_poses_ir_left, rig_poses_ir_righ
     if mount_frame == "COLOR":
         return rig_poses_color
     return rig_poses_ir_left
+
+
+def _projector_pattern_source(rs: RealSenseProfile) -> str:
+    if not rs.has_projector():
+        return "fallback:generated(seed=0)"
+
+    pr = rs.get_projector()
+    if getattr(pr, "pattern_path", None):
+        return f"path:{pr.pattern_path}"
+
+    seed = getattr(pr, "pattern_seed", None)
+    min_sep_px = getattr(pr, "pattern_min_sep_px", None)
+    dot_radius_px = getattr(pr, "pattern_dot_radius_px", None)
+    return (
+        "generated:"
+        f"seed={seed},"
+        f"dot_count={pr.dot_count},"
+        f"min_sep_px={min_sep_px},"
+        f"dot_radius_px={dot_radius_px}"
+    )
+
+
+def _log_projector_config(rs: RealSenseProfile, mount_obj):
+    _target_obj, binding = resolve_projector_target(rs, mount_obj)
+    local_translation = np.array2string(binding["local_translation"], precision=6, suppress_small=False)
+    local_rotation_deg = np.array2string(
+        np.rad2deg(binding["local_rotation_euler_rad"]),
+        precision=6,
+        suppress_small=False,
+    )
+
+    if not rs.has_projector():
+        s = rs.get_stream("IR_LEFT")
+        print(
+            "[Projector] source=fallback:generated(seed=0) | "
+            f"pattern_size={s.width}x{s.height} | "
+            f"projector_fov_deg=legacy_from_ir_left | "
+            "mount_mode=legacy_frame_lock | mount_frame=IR_LEFT | "
+            f"local_transform_mode={binding['local_transform_mode']} | "
+            f"local_transform_applied={binding['local_transform_applied']} | "
+            f"projector_socket={binding['projector_socket_name']} | "
+            f"local_translation={local_translation} | "
+            f"local_rotation_euler_deg={local_rotation_deg} | "
+            "local_transform_blender=identity"
+        )
+        return
+
+    pr = rs.get_projector()
+    fov_h_rad, fov_v_rad = rs.get_projector_fov_rad()
+    local_T = rs.get_projector_local_transform_blender()
+    local_T_str = np.array2string(local_T, precision=6, suppress_small=False)
+    print(
+        f"[Projector] source={_projector_pattern_source(rs)} | "
+        f"pattern_size={pr.pattern_w}x{pr.pattern_h} | "
+        f"projector_fov_deg=({np.rad2deg(fov_h_rad):.3f}, {np.rad2deg(fov_v_rad):.3f}) | "
+        f"mount_mode={rs.get_projector_mount_mode()} | "
+        f"mount_frame={rs.get_projector_mount_frame()} | "
+        f"local_transform_mode={binding['local_transform_mode']} | "
+        f"local_transform_applied={binding['local_transform_applied']} | "
+        f"projector_socket={binding['projector_socket_name']} | "
+        f"local_translation={local_translation} | "
+        f"local_rotation_euler_deg={local_rotation_deg} | "
+        f"local_transform_blender={local_T_str}"
+    )
 
 
 # -------------------- main --------------------
@@ -262,9 +394,10 @@ def main(argv=None):
     bproc.renderer.enable_normals_output()
 
     # -------------------- scene --------------------
-    light_point = _build_room_and_lights(cfg)
+    light_point, light_plane_material = _build_room_and_lights(cfg)
     proj = None
     mount = None
+    ir_lighting_state = None
 
     try:
         _prepare_objects(cfg)
@@ -276,6 +409,8 @@ def main(argv=None):
         output_dir = getattr(cfg, "output_dir", "test")
         jpg_quality = int(getattr(cfg, "jpg_quality", 95))
         depth_scale_mm = float(getattr(cfg, "depth_scale_mm", 1.0))
+        ir_render_cfg = _get_ir_render_config(cfg)
+        ir_lighting_state = _capture_render_lighting_state(light_point, light_plane_material)
 
         # -------------------- stereo params --------------------
         depth_min_m = float(rs.depth_min_m)
@@ -310,6 +445,15 @@ def main(argv=None):
         # -------------------- mount/projector --------------------
         mount = get_or_create_mount_empty("rs_projector_mount")
         mount_poses = _pick_mount_poses(rs, rig_poses_ir_left, rig_poses_ir_right, rig_poses_color)
+        _log_projector_config(rs, mount)
+        print(
+            "[IR Render] "
+            f"enabled={ir_render_cfg['enabled']} | "
+            f"environment_scale={ir_render_cfg['environment_scale']:.3f} | "
+            f"point_light_scale={ir_render_cfg['point_light_scale']:.3f} | "
+            f"emissive_scale={ir_render_cfg['emissive_scale']:.3f} | "
+            f"rgb_to_intensity_mode={ir_render_cfg['rgb_to_intensity_mode']}"
+        )
 
         # ---------------------------------------------------------------------
         # PASS 1: IR_LEFT (with IR projector)
@@ -321,6 +465,8 @@ def main(argv=None):
 
         animate_mount_from_cam2world(mount, mount_poses)
         proj = create_realsense_ir_projector(rs, mount, dots=None, energy=None)
+        if ir_render_cfg["enabled"]:
+            _apply_ir_lighting_state(ir_lighting_state, ir_render_cfg)
         data_ir_left = bproc.renderer.render()
 
         # ---------------------------------------------------------------------
@@ -333,6 +479,8 @@ def main(argv=None):
 
         animate_mount_from_cam2world(mount, mount_poses)
         data_ir_right = bproc.renderer.render()
+        if ir_render_cfg["enabled"]:
+            _restore_render_lighting_state(ir_lighting_state)
 
         # проектор больше не нужен
         proj.delete()
@@ -349,8 +497,14 @@ def main(argv=None):
         # ---------------------------------------------------------------------
         # Build stereo frames
         # ---------------------------------------------------------------------
-        irL = data_ir_left["colors"]
-        irR = data_ir_right["colors"]
+        irL = _convert_ir_frames_to_intensity(
+            data_ir_left["colors"],
+            mode=ir_render_cfg["rgb_to_intensity_mode"],
+        )
+        irR = _convert_ir_frames_to_intensity(
+            data_ir_right["colors"],
+            mode=ir_render_cfg["rgb_to_intensity_mode"],
+        )
 
         # Можно оставить обычный list; pipeline внутри сам вернет FrameSeries с metadata.
         stereo_frames = [np.stack([a, b], axis=0) for a, b in zip(irL, irR)]
@@ -457,8 +611,8 @@ def main(argv=None):
             color_file_format="JPEG",
             jpg_quality=jpg_quality,
             data_rgbs=data_rgb["colors"],
-            data_ir_lefts=data_ir_left["colors"],
-            data_ir_rights=data_ir_right["colors"],
+            data_ir_lefts=irL,
+            data_ir_rights=irR,
             depth_scale_mm=depth_scale_mm,
             depth_ir_left_rect_m=depth_rect_m,             # IR_LEFT_RECT grid
             depth_color_from_ir_rect_m=depth_rect_align_rgb_m,  # COLOR grid
@@ -470,6 +624,11 @@ def main(argv=None):
 
     finally:
         # cleanup
+        if ir_lighting_state is not None:
+            try:
+                _restore_render_lighting_state(ir_lighting_state)
+            except Exception:
+                pass
         if proj is not None:
             try:
                 proj.delete()

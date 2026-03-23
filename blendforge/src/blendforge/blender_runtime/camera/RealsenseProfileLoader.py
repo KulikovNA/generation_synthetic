@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -57,6 +57,31 @@ def _cv_T_to_blender(T_cv: np.ndarray) -> np.ndarray:
     return C @ T_cv @ C
 
 
+def _resolve_path_from_base(path: Optional[str], base_dir: Optional[Path]) -> Optional[str]:
+    if path in (None, ""):
+        return None
+
+    p = Path(str(path)).expanduser()
+    if p.is_absolute():
+        return str(p.resolve())
+
+    if base_dir is not None:
+        candidate = (base_dir / p)
+        if candidate.exists():
+            return str(candidate.resolve())
+
+        # Some projector assets are stored deeper under the profile directory
+        # tree (for example inside wall_capture/session_*/...). If there is a
+        # single unambiguous suffix match, prefer it over a broken relative path.
+        matches = [m for m in base_dir.rglob(str(p)) if m.is_file()]
+        if len(matches) == 1:
+            return str(matches[0].resolve())
+
+        return str(candidate.resolve())
+
+    return str(p)
+
+
 def _deg2rad(x: float) -> float:
     return float(np.deg2rad(float(x)))
 
@@ -81,6 +106,18 @@ def _clamp_int(x: int, lo: int, hi: int) -> int:
     return max(int(lo), min(int(hi), int(x)))
 
 
+def _orthonormalize_rotation(R: np.ndarray) -> np.ndarray:
+    """
+    Project a near-rotation matrix onto SO(3).
+    """
+    U, _, Vt = np.linalg.svd(np.asarray(R, dtype=np.float64))
+    R_ortho = U @ Vt
+    if np.linalg.det(R_ortho) < 0:
+        U[:, -1] *= -1.0
+        R_ortho = U @ Vt
+    return R_ortho
+
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -100,17 +137,32 @@ class ProjectorCalib:
     Projector != camera.
 
     fov_h/v describe projector optics cone,
-    pattern_image describes cookie/texture resolution (independent from render res).
+    pattern_image describes cookie/texture parameters (independent from render res).
+
+    local_transform_cv, when present, is T_mount_from_projector in CV optical
+    convention. When it is absent, the simulator may use an approximate midpoint
+    between IR_LEFT and IR_RIGHT as a synthetic projector mount geometry.
+    This midpoint is only a simulator approximation, not measured factory
+    extrinsics.
     """
     wavelength_nm: float
     fov_h_deg: float
     fov_v_deg: float
     pattern_w: int
     pattern_h: int
+    pattern_path: Optional[str]
+    pattern_seed: Optional[int]
+    pattern_min_sep_px: Optional[float]
+    pattern_dot_radius_px: Optional[float]
     dot_count: int
     energy: float
+    mount_mode: str
     mount_frame: str
+    local_transform_cv: Optional[np.ndarray] = None
     type: str = "vcsel_dot"
+    pattern_dot_sigma_px: Optional[float] = None
+    pattern_image_metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def fov_h_rad(self) -> float:
@@ -170,6 +222,65 @@ class RealSenseProfile:
     device: DeviceInfo = DeviceInfo()
 
     projector: Optional[ProjectorCalib] = None
+    profile_json_path: Optional[str] = None
+    profile_base_dir: Optional[str] = None
+    fitting_seed_metadata: Optional[Dict[str, Any]] = None
+    extra_metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def _resolve_T_cv(self, source: str, target: str) -> np.ndarray:
+        """
+        Resolve T_target_from_source in CV convention.
+
+        Supports:
+          - direct key
+          - inverse of reverse key
+          - composition via COLOR anchor
+        """
+        if source == target:
+            return np.eye(4, dtype=np.float64)
+
+        key = f"{source}_to_{target}"
+        if key in self.extrinsics_cv:
+            return self.extrinsics_cv[key].copy()
+
+        rev = f"{target}_to_{source}"
+        if rev in self.extrinsics_cv:
+            return np.linalg.inv(self.extrinsics_cv[rev])
+
+        if source != "COLOR" and target != "COLOR":
+            k_sc = f"{source}_to_COLOR"
+            k_tc = f"{target}_to_COLOR"
+            if k_sc in self.extrinsics_cv and k_tc in self.extrinsics_cv:
+                T_c_s = self.extrinsics_cv[k_sc]
+                T_c_t = self.extrinsics_cv[k_tc]
+                return np.linalg.inv(T_c_t) @ T_c_s
+
+        raise KeyError(
+            f"Could not resolve extrinsic '{source}_to_{target}'. "
+            f"Available: {list(self.extrinsics_cv.keys())}"
+        )
+
+    def _approx_projector_local_transform_cv(self, mount_frame: str) -> np.ndarray:
+        """
+        Build an approximate T_mount_from_projector in CV convention by placing a
+        synthetic projector at the midpoint between IR_LEFT and IR_RIGHT.
+
+        IMPORTANT:
+          - this is a simulator approximation only
+          - this is NOT measured factory projector extrinsics
+        """
+        T_mount_from_left = self._resolve_T_cv("IR_LEFT", mount_frame)
+        T_mount_from_right = self._resolve_T_cv("IR_RIGHT", mount_frame)
+
+        R_left = T_mount_from_left[:3, :3]
+        R_right = T_mount_from_right[:3, :3]
+        t_left = T_mount_from_left[:3, 3]
+        t_right = T_mount_from_right[:3, 3]
+
+        T_mount_from_projector = np.eye(4, dtype=np.float64)
+        T_mount_from_projector[:3, :3] = _orthonormalize_rotation(0.5 * (R_left + R_right))
+        T_mount_from_projector[:3, 3] = 0.5 * (t_left + t_right)
+        return T_mount_from_projector
 
 
     # -----------------------------------------------------------------------
@@ -180,6 +291,8 @@ class RealSenseProfile:
         p = Path(path)
         if not p.is_file():
             raise FileNotFoundError(f"RealSense profile JSON not found: {path}")
+        profile_json_path = str(p.resolve())
+        profile_base_dir = p.resolve().parent
 
         with p.open("r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -281,6 +394,32 @@ class RealSenseProfile:
         projector: Optional[ProjectorCalib] = None
         if isinstance(proj_cfg, dict):
             pat = proj_cfg.get("pattern_image", {}) or {}
+            local_transform_cv = None
+            if "local_transform_4x4" in proj_cfg and proj_cfg.get("local_transform_4x4") is not None:
+                local_transform_cv = _as_T44(proj_cfg["local_transform_4x4"])
+            pattern_path = _resolve_path_from_base(
+                None if pat.get("path", None) in (None, "") else str(pat.get("path")),
+                profile_base_dir,
+            )
+            pattern_image_metadata = {
+                str(k): v for k, v in pat.items()
+                if k not in {"width", "height", "path", "seed", "min_sep_px", "dot_radius_px", "dot_sigma_px"}
+            }
+            projector_metadata = {
+                str(k): v for k, v in proj_cfg.items()
+                if k not in {
+                    "type",
+                    "wavelength_nm",
+                    "fov_h_deg",
+                    "fov_v_deg",
+                    "pattern_image",
+                    "dot_count",
+                    "energy",
+                    "mount_mode",
+                    "mount_frame",
+                    "local_transform_4x4",
+                }
+            }
             projector = ProjectorCalib(
                 type=str(proj_cfg.get("type", "vcsel_dot")),
                 wavelength_nm=float(proj_cfg.get("wavelength_nm", 850.0)),
@@ -288,10 +427,38 @@ class RealSenseProfile:
                 fov_v_deg=float(proj_cfg.get("fov_v_deg", 65.0)),
                 pattern_w=int(pat.get("width", 640)),
                 pattern_h=int(pat.get("height", 480)),
+                pattern_path=pattern_path,
+                pattern_seed=None if pat.get("seed", None) is None else int(pat.get("seed")),
+                pattern_min_sep_px=None if pat.get("min_sep_px", None) is None else float(pat.get("min_sep_px")),
+                pattern_dot_radius_px=None if pat.get("dot_radius_px", None) is None else float(pat.get("dot_radius_px")),
+                pattern_dot_sigma_px=None if pat.get("dot_sigma_px", None) is None else float(pat.get("dot_sigma_px")),
+                pattern_image_metadata=pattern_image_metadata,
                 dot_count=int(proj_cfg.get("dot_count", 5000)),
                 energy=float(proj_cfg.get("energy", 3000.0)),
+                mount_mode=str(proj_cfg.get("mount_mode", "legacy_frame_lock")),
                 mount_frame=str(proj_cfg.get("mount_frame", "IR_LEFT")),
+                local_transform_cv=local_transform_cv,
+                metadata=projector_metadata,
             )
+
+        fitting_seed_metadata = None
+        if isinstance(cfg.get("fitting_seed_metadata", None), dict):
+            fitting_seed_metadata = dict(cfg["fitting_seed_metadata"])
+
+        extra_metadata = {
+            str(k): v for k, v in cfg.items()
+            if k not in {
+                "device",
+                "streams",
+                "stream_index_map",
+                "extrinsics",
+                "derived",
+                "depth_range_m",
+                "stereo",
+                "projector",
+                "fitting_seed_metadata",
+            }
+        }
 
         return RealSenseProfile(
             streams=streams,
@@ -302,6 +469,10 @@ class RealSenseProfile:
             stereo=stereo,
             device=device,
             projector=projector,
+            profile_json_path=profile_json_path,
+            profile_base_dir=str(profile_base_dir),
+            fitting_seed_metadata=fitting_seed_metadata,
+            extra_metadata=extra_metadata,
         )
 
     # -----------------------------------------------------------------------
@@ -311,6 +482,9 @@ class RealSenseProfile:
         if stream not in self.streams:
             raise KeyError(f"Unknown stream '{stream}'. Available: {list(self.streams.keys())}")
         return self.streams[stream]
+
+    def has_stream(self, stream: str) -> bool:
+        return stream in self.streams
 
     def set_bproc_intrinsics(self, stream: str) -> Tuple[np.ndarray, int, int]:
         """
@@ -412,12 +586,7 @@ class RealSenseProfile:
         Return T_target_from_source in CV convention.
         Example: get_T_cv("IR_LEFT","COLOR") -> key "IR_LEFT_to_COLOR".
         """
-        key = f"{source}_to_{target}"
-        if key not in self.extrinsics_cv:
-            raise KeyError(
-                f"Extrinsic '{key}' not found. Available: {list(self.extrinsics_cv.keys())}"
-            )
-        return self.extrinsics_cv[key].copy()
+        return self._resolve_T_cv(source, target)
 
     def get_T_blender(self, source: str, target: str) -> np.ndarray:
         """
@@ -464,6 +633,36 @@ class RealSenseProfile:
 
     def get_projector_mount_frame(self) -> str:
         return str(self.get_projector().mount_frame)
+
+    def get_projector_mount_mode(self) -> str:
+        return str(self.get_projector().mount_mode)
+
+    def has_projector_local_transform(self) -> bool:
+        pr = self.get_projector()
+        return pr.local_transform_cv is not None
+
+    def get_projector_local_transform_cv(self) -> np.ndarray:
+        """
+        Return T_mount_from_projector in CV convention.
+
+        If explicit local_transform_4x4 is absent in JSON, the simulator falls
+        back to a midpoint approximation between IR_LEFT and IR_RIGHT.
+        This fallback is synthetic and should not be interpreted as measured
+        factory projector extrinsics.
+        """
+        pr = self.get_projector()
+        if pr.local_transform_cv is not None:
+            return pr.local_transform_cv.copy()
+        return self._approx_projector_local_transform_cv(pr.mount_frame)
+
+    def get_projector_local_transform_blender(self) -> np.ndarray:
+        """
+        Return T_mount_from_projector in Blender camera-axis convention.
+
+        The fallback midpoint path is a simulator approximation only, not a
+        measured factory calibration.
+        """
+        return _cv_T_to_blender(self.get_projector_local_transform_cv())
 
     def get_projector_wavelength_nm(self) -> float:
         return float(self.get_projector().wavelength_nm)

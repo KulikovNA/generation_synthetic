@@ -1,0 +1,207 @@
+{
+  "device": {
+    "family": "Intel RealSense D400",
+    "model": "D435",
+    "profile_name": "1280x800@15_effective_projector_seed",
+    "units": {
+      "translation": "meters",
+      "intrinsics": "pixels"
+    }
+  },
+  "stream_index_map": {
+    "IR_LEFT": 1,
+    "IR_RIGHT": 2,
+    "note": "RealSense SDK: infrared(1)=Left, infrared(2)=Right"
+  },
+  "streams": {
+    "IR_LEFT": {
+      "width": 1280,
+      "height": 800,
+      "intrinsics": {
+        "fx": 638.0753784179688,
+        "fy": 638.0753784179688,
+        "ppx": 637.6392822265625,
+        "ppy": 387.4197998046875,
+        "distortion_model": "brown_conrady",
+        "distortion_coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "IR_RIGHT": {
+      "width": 1280,
+      "height": 800,
+      "intrinsics": {
+        "fx": 638.0753784179688,
+        "fy": 638.0753784179688,
+        "ppx": 637.6392822265625,
+        "ppy": 387.4197998046875,
+        "distortion_model": "brown_conrady",
+        "distortion_coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "DEPTH": {
+      "width": 1280,
+      "height": 800,
+      "intrinsics": {
+        "fx": 638.0753784179688,
+        "fy": 638.0753784179688,
+        "ppx": 637.6392822265625,
+        "ppy": 387.4197998046875,
+        "distortion_model": "brown_conrady",
+        "distortion_coeffs": [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      "note": "In this profile DEPTH intrinsics are assumed equal to IR_LEFT for stereo simulation."
+    }
+  },
+  "extrinsics": {
+    "IR_RIGHT_to_IR_LEFT": {
+      "source_frame": "IR_RIGHT",
+      "target_frame": "IR_LEFT",
+      "T_target_from_source_4x4": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.049832768738269806
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "IR_LEFT_to_IR_RIGHT": {
+      "source_frame": "IR_LEFT",
+      "target_frame": "IR_RIGHT",
+      "T_target_from_source_4x4": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          -0.049832768738269806
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  },
+  "derived": {
+    "baseline_m": 0.049832768738269806,
+    "baseline_mm": 49.832768738269806,
+    "how_computed": "Direct from IR_RIGHT_to_IR_LEFT translation norm"
+  },
+  "depth_range_m": {
+    "min": 0.2,
+    "max": 10.0,
+    "note": "Keep as simulation limits; fitting scene used observed plane at ~1.0042 m."
+  },
+  "stereo": {
+    "num_disparities_margin": 1.15,
+    "num_disparities_clamp": [
+      64,
+      256
+    ]
+  },
+  "projector": {
+    "type": "effective_dot_projector_seed",
+    "mount_mode": "local_transform",
+    "mount_frame": "IR_LEFT",
+    "local_transform_4x4": [
+      [
+        -0.9994572065745778,
+        0.0,
+        0.03294377367791568,
+        0.024916384369134903
+      ],
+      [
+        0.0002919955265836545,
+        -0.9999607188449183,
+        0.008858640063060209,
+        0.0
+      ],
+      [
+        0.03294247960846445,
+        0.008863451086027032,
+        0.9994179467420071,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "fov_h_deg": 97.49236900816605,
+    "fov_v_deg": 68.26463176702406,
+    "energy": 750.0,
+    "pattern_image": {
+      "width": 1280,
+      "height": 800,
+      "path": "projector_stage2/projector_texture.png",
+      "dot_sigma_px": 2.5,
+      "seed": null,
+      "min_sep_px": null,
+      "dot_radius_px": null
+    },
+    "notes": [
+      "Effective projector seed fit from single observed plane.",
+      "If projected pattern appears mirrored horizontally, flip texture U."
+    ]
+  },
+  "fitting_seed_metadata": {
+    "plane_z_mm": 1004.2,
+    "expected_disparity_px_from_plane_z": 31.664073660910805,
+    "matched_count": 510,
+    "measured_disparity_mean_px": 33.13333511352539,
+    "measured_disparity_std_px": 0.5956267714500427,
+    "plane_fit_rmse_m": 0.015048506630555352
+  }
+}
