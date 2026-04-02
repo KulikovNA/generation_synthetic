@@ -1,11 +1,14 @@
 import blenderproc as bproc
 
 import argparse
+import copy
+import json
 import os
 import random
 import sys
-import copy
 from pathlib import Path
+
+import cv2
 import numpy as np
 from addon_utils import enable
 from filelock import FileLock
@@ -33,14 +36,21 @@ from blendforge.blender_runtime.stereo.MatcherConfigUtility import (
     sample_scalar_or_range,
 )
 from blendforge.blender_runtime.utils import build_lookat_pose_cam, sample_pose_func, sample_pose_func_drop
+from blendforge.blender_runtime.writer.RGBDCOCOWriter import (
+    _ensure_dir,
+    _save_png_u16,
+    _save_rgb,
+    meters_to_depth_u16,
+)
 from blendforge.blender_runtime.writer.RGBDStereoCOCOWriter import (
     write_coco_with_stereo_depth_annotations,
 )
-from blendforge.blender_runtime.writer.YoloWriterUtility import write_yolo_annotations
 
 
 def parse_args(argv):
-    parser = argparse.ArgumentParser(description="Fractured RGB-D COCO scenario with stereo multidepth outputs.")
+    parser = argparse.ArgumentParser(
+        description="Debug RGB-D COCO scenario with stereo multidepth and extra raw/matched outputs."
+    )
     parser.add_argument("--config_file", type=str, required=True)
     return parser.parse_args(argv)
 
@@ -255,6 +265,167 @@ def _normalize_stereo_branch_mode(value):
     return ordered, normalized
 
 
+def _color_extension(color_file_format: str) -> str:
+    return "jpg" if str(color_file_format).upper() in {"JPG", "JPEG"} else "png"
+
+
+def _to_u8_preview(img: np.ndarray, *, low: float = 1.0, high: float = 99.0) -> np.ndarray:
+    x = np.asarray(img, dtype=np.float32)
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    valid = np.isfinite(x) & (x > 0.0)
+    if x.size == 0 or not np.any(valid):
+        return np.zeros((1, 1), dtype=np.uint8)
+    xv = x[valid]
+    lo = float(np.percentile(xv, low))
+    hi = float(np.percentile(xv, high))
+    if hi <= lo + 1e-6:
+        hi = lo + 1e-6
+    y = np.clip((x - lo) / (hi - lo), 0.0, 1.0)
+    out = (y * 255.0 + 0.5).astype(np.uint8)
+    out[~valid] = 0
+    return out
+
+
+def _depth_preview_gray(depth_m: np.ndarray) -> np.ndarray:
+    d = np.asarray(depth_m, dtype=np.float32)
+    inv = np.where(d > 0.0, 1.0 / np.maximum(d, 1e-6), 0.0)
+    return _to_u8_preview(inv, low=1.0, high=99.0)
+
+
+def _save_gray_png(path: Path, img_u8: np.ndarray) -> None:
+    _ensure_dir(str(path.parent))
+    cv2.imwrite(str(path), np.asarray(img_u8, dtype=np.uint8))
+
+
+def _peek_next_coco_image_id(coco_out_dir: Path) -> int:
+    coco_path = coco_out_dir / "coco_annotations.json"
+    if not coco_path.exists():
+        return 0
+
+    with coco_path.open("r", encoding="utf-8") as file:
+        coco_data = json.load(file)
+
+    images = coco_data.get("images") or []
+    if not images:
+        return 0
+
+    return max(int(image.get("id", 0)) for image in images) + 1
+
+
+def _build_debug_dirs(coco_out_dir: Path) -> dict[str, Path]:
+    return {
+        "raw_left_effective": coco_out_dir / "raw_left_effective",
+        "raw_right_effective": coco_out_dir / "raw_right_effective",
+        "raw_left_random": coco_out_dir / "raw_left_random",
+        "raw_right_random": coco_out_dir / "raw_right_random",
+        "depth_left_rect_effective": coco_out_dir / "depth_left_rect_effective",
+        "depth_left_rect_random": coco_out_dir / "depth_left_rect_random",
+    }
+
+
+def _save_debug_branch_artifacts(
+    *,
+    debug_dirs: dict[str, Path],
+    image_id: int,
+    render_outputs: dict,
+    stereo_outputs: dict,
+    raw_color_file_format: str,
+    raw_jpg_quality: int,
+    depth_scale_mm: float,
+    depth_save_mode: str,
+) -> None:
+    stem = f"{int(image_id):06d}"
+    raw_ext = _color_extension(raw_color_file_format)
+
+    for path in debug_dirs.values():
+        _ensure_dir(str(path))
+
+    for branch_name in render_outputs.keys():
+        branch_render = render_outputs[branch_name]
+        branch_stereo = stereo_outputs[branch_name]
+
+        left_raw_path = debug_dirs[f"raw_left_{branch_name}"] / f"{stem}.{raw_ext}"
+        right_raw_path = debug_dirs[f"raw_right_{branch_name}"] / f"{stem}.{raw_ext}"
+        depth_rect_path = debug_dirs[f"depth_left_rect_{branch_name}"] / f"{stem}.png"
+
+        _save_rgb(
+            str(left_raw_path),
+            np.asarray(branch_render["left_colors"]),
+            fmt=raw_color_file_format,
+            jpg_quality=raw_jpg_quality,
+        )
+        _save_rgb(
+            str(right_raw_path),
+            np.asarray(branch_render["right_colors"]),
+            fmt=raw_color_file_format,
+            jpg_quality=raw_jpg_quality,
+        )
+
+        depth_rect = np.asarray(branch_stereo["depth_rect_m"], dtype=np.float32)
+        if depth_save_mode == "u16":
+            _save_png_u16(
+                str(depth_rect_path),
+                meters_to_depth_u16(
+                    depth_rect,
+                    depth_scale_mm=float(depth_scale_mm),
+                ),
+            )
+        elif depth_save_mode == "preview_gray":
+            _save_gray_png(depth_rect_path, _depth_preview_gray(depth_rect))
+        else:
+            raise ValueError(
+                f"Unsupported debug_output.depth_save_mode={depth_save_mode!r}. "
+                "Expected one of: 'u16', 'preview_gray'."
+            )
+
+
+def _overwrite_coco_matched_depth_files(
+    *,
+    coco_out_dir: Path,
+    image_id: int,
+    depth_gt_rgb: np.ndarray,
+    aligned_depths: dict,
+    depth_scale_mm: float,
+    gt_save_mode: str,
+    save_mode: str,
+) -> None:
+    stem = f"{int(image_id):06d}"
+
+    depth_gt_path = coco_out_dir / "depth" / f"{stem}.png"
+    depth_gt = np.asarray(depth_gt_rgb, dtype=np.float32)
+
+    if gt_save_mode == "preview_gray":
+        _save_gray_png(depth_gt_path, _depth_preview_gray(depth_gt))
+    elif gt_save_mode != "u16":
+        raise ValueError(
+            f"Unsupported debug_output.coco_gt_depth_save_mode={gt_save_mode!r}. "
+            "Expected one of: 'u16', 'preview_gray'."
+        )
+
+    if save_mode == "u16":
+        return
+
+    for branch_name in ("effective", "random"):
+        if branch_name not in aligned_depths:
+            continue
+
+        depth_path = coco_out_dir / f"depth_{branch_name}" / f"{stem}.png"
+        depth = np.asarray(aligned_depths[branch_name], dtype=np.float32)
+
+        if save_mode == "preview_gray":
+            _save_gray_png(depth_path, _depth_preview_gray(depth))
+        elif save_mode == "u16":
+            _save_png_u16(
+                str(depth_path),
+                meters_to_depth_u16(depth, depth_scale_mm=float(depth_scale_mm)),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported debug_output.coco_matched_depth_save_mode={save_mode!r}. "
+                "Expected one of: 'u16', 'preview_gray'."
+            )
+
+
 def main(argv=None):
     bproc.init()
     enable("object_fracture_cell")
@@ -268,7 +439,7 @@ def main(argv=None):
 
     camera_profile_json = str(getattr(cfg, "camera_profile_json", "")).strip()
     if not camera_profile_json:
-        raise ValueError("camera_profile_json must be provided in the config for seg_with_depth_stereo_multidepth.")
+        raise ValueError("camera_profile_json must be provided in the config for debug_stereo_multidepth.")
     rs = RealSenseProfile.from_json(camera_profile_json)
 
     seed = int(getattr(cfg, "scene_seed", random.SystemRandom().randrange(0, 2**31 - 1)))
@@ -296,9 +467,8 @@ def main(argv=None):
     split_name = str(getattr(cfg, "dataset_type", "train"))
     output_root = Path(cfg.output_dir).resolve()
     coco_out_dir = output_root / "coco_data" / split_name
-    yolo_out_dir = output_root / "yolo_data"
     coco_out_dir.mkdir(parents=True, exist_ok=True)
-    yolo_out_dir.mkdir(parents=True, exist_ok=True)
+    debug_dirs = _build_debug_dirs(coco_out_dir)
     lock = FileLock(str(output_root / ".lock"))
 
     save_ir_pairs = bool(cfg_get(getattr(cfg, "stereo_output", None), "save_ir_pairs", True))
@@ -311,6 +481,17 @@ def main(argv=None):
     enabled_branches, stereo_branch_mode = _normalize_stereo_branch_mode(
         getattr(cfg, "stereo_branch_mode", "both")
     )
+
+    debug_output_cfg = getattr(cfg, "debug_output", None)
+    raw_color_file_format = str(cfg_get(debug_output_cfg, "raw_color_file_format", "PNG"))
+    raw_jpg_quality = int(cfg_get(debug_output_cfg, "raw_jpg_quality", getattr(cfg, "jpg_quality", 95)))
+    depth_save_mode = str(cfg_get(debug_output_cfg, "depth_save_mode", "preview_gray")).strip().lower()
+    coco_gt_depth_save_mode = str(
+        cfg_get(debug_output_cfg, "coco_gt_depth_save_mode", "preview_gray")
+    ).strip().lower()
+    coco_matched_depth_save_mode = str(
+        cfg_get(debug_output_cfg, "coco_matched_depth_save_mode", "preview_gray")
+    ).strip().lower()
 
     lighting_base_state = None
     try:
@@ -325,8 +506,6 @@ def main(argv=None):
             _prepare_fragments_for_scene(fractured_objs, cfg)
             rig_poses_ir_left, _rig_poses_ir_right, rig_poses_color = _build_rig_poses_for_fragments(cfg, rs)
 
-            # COCO-ветки в репозитории работают именно так: сначала batch render всех поз
-            # с segmentation output, затем writer берет instance maps из общего render data.
             rgb_render_cfg = sample_render_sample_config(cfg)
             rgb_energy_cfg = sample_effective_energy_config(cfg)
             bproc.renderer.set_max_amount_of_samples(int(rgb_render_cfg["rgb_max_amount_of_samples"]))
@@ -351,7 +530,7 @@ def main(argv=None):
             )
 
             print(
-                "[Seg Stereo MultiDepth] "
+                "[Debug Seg Stereo MultiDepth] "
                 f"run={run_idx + 1}/{num_runs} | poses={len(rig_poses_ir_left)} | "
                 f"seed={seed} | branches={stereo_branch_mode}"
             )
@@ -428,6 +607,17 @@ def main(argv=None):
                 depth_gt_rgb = np.asarray(data_rgb["depth"][pose_idx], dtype=np.float32)
 
                 with lock:
+                    next_image_id = _peek_next_coco_image_id(coco_out_dir)
+                    _save_debug_branch_artifacts(
+                        debug_dirs=debug_dirs,
+                        image_id=next_image_id,
+                        render_outputs=render_outputs,
+                        stereo_outputs=stereo_outputs,
+                        raw_color_file_format=raw_color_file_format,
+                        raw_jpg_quality=raw_jpg_quality,
+                        depth_scale_mm=depth_scale,
+                        depth_save_mode=depth_save_mode,
+                    )
                     write_coco_with_stereo_depth_annotations(
                         output_dir=str(coco_out_dir),
                         instance_segmaps=[data_rgb["instance_segmaps"][pose_idx]],
@@ -467,22 +657,18 @@ def main(argv=None):
                         depth_unit="mm",
                         depth_scale_mm=depth_scale,
                     )
-                    write_yolo_annotations(
-                        output_root=str(yolo_out_dir),
-                        split=split_name,
-                        instance_segmaps=[data_rgb["instance_segmaps"][pose_idx]],
-                        instance_attribute_maps=[data_rgb["instance_attribute_maps"][pose_idx]],
-                        colors=[rgb],
-                        color_file_format=color_file_format,
-                        append_to_existing_output=True,
-                        jpg_quality=int(getattr(cfg, "jpg_quality", 95)),
-                        polygon_tolerance_px=2.0,
-                        min_area_px=10,
-                        one_contour_per_instance=True,
+                    _overwrite_coco_matched_depth_files(
+                        coco_out_dir=coco_out_dir,
+                        image_id=next_image_id,
+                        depth_gt_rgb=depth_gt_rgb,
+                        aligned_depths=aligned_depths,
+                        depth_scale_mm=depth_scale,
+                        gt_save_mode=coco_gt_depth_save_mode,
+                        save_mode=coco_matched_depth_save_mode,
                     )
 
                 print(
-                    "[Seg Stereo MultiDepth] "
+                    "[Debug Seg Stereo MultiDepth] "
                     f"saved pose={pose_idx + 1}/{len(rig_poses_ir_left)}"
                 )
     finally:

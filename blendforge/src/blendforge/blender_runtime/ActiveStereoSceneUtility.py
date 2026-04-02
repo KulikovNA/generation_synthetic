@@ -59,6 +59,37 @@ def _sample_int_from_range(value, default):
     return int(np.random.randint(lo, hi + 1))
 
 
+def _normalize_rgb_triplet(value, default):
+    raw = default if value is None else value
+    arr = np.asarray(raw, dtype=np.float32).reshape(-1)
+    if arr.size != 3:
+        raise ValueError(f"RGB triplet must contain exactly 3 values, got {arr.tolist()}")
+    arr = np.clip(arr, 0.0, 1.0)
+    return arr
+
+
+def _sample_rgb_from_range(value, default):
+    if value is None:
+        return tuple(float(v) for v in _normalize_rgb_triplet(default, default))
+
+    arr = np.asarray(value, dtype=np.float32)
+    if arr.ndim == 1:
+        return tuple(float(v) for v in _normalize_rgb_triplet(arr, default))
+
+    if arr.ndim == 2 and arr.shape[0] == 1:
+        return tuple(float(v) for v in _normalize_rgb_triplet(arr[0], default))
+
+    if arr.ndim != 2 or arr.shape[0] < 2:
+        raise ValueError(
+            "RGB color range must be either [r, g, b] or [[r_lo, g_lo, b_lo], [r_hi, g_hi, b_hi]]"
+        )
+
+    lo = _normalize_rgb_triplet(arr[0], default)
+    hi = _normalize_rgb_triplet(arr[1], default)
+    lo, hi = np.minimum(lo, hi), np.maximum(lo, hi)
+    return tuple(float(v) for v in np.random.uniform(lo, hi))
+
+
 def build_room_and_lights(cfg):
     room_planes = [
         bproc.object.create_primitive("PLANE", scale=[3, 3, 1]),
@@ -150,6 +181,14 @@ def sample_effective_energy_config(cfg) -> dict:
                 _section_get(legacy_section, "projector_energy_range", [50.0, 150.0]),
             ),
             [50.0, 150.0],
+        ),
+        "projector_color_rgb": _sample_rgb_from_range(
+            _section_get(
+                stereo_section,
+                "projector_color_range",
+                _section_get(legacy_section, "projector_color_range", [1.0, 1.0, 1.0]),
+            ),
+            [1.0, 1.0, 1.0],
         ),
         "rgb_light_energy": _sample_uniform_from_range(
             _section_get(

@@ -31,7 +31,6 @@ def _install_interrupt_handlers():
         try:
             signal.signal(sig, _signal_to_keyboard_interrupt)
         except ValueError:
-            # Signal handlers can only be installed in the main thread.
             pass
 
 
@@ -194,7 +193,7 @@ def env_generic(index_device, cfg):
             "run",
             "--temp-dir",
             tmp_root,
-            "scenarios/seg_with_depth/main_stereo_multidepth.py",
+            "scenarios/seg_with_depth/debug_stereo_multidepth.py",
             "--config_file",
             path_to_cfg,
         ]

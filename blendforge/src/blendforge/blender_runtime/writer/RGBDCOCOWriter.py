@@ -91,10 +91,19 @@ def _load_json(path: str) -> Any:
         return json.load(f)
 
 
+def _json_dump_kwargs(indent: Optional[Union[int, str]] = None) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"ensure_ascii": False}
+    if indent is not None:
+        kwargs["indent"] = indent
+    else:
+        kwargs["separators"] = (",", ":")
+    return kwargs
+
+
 def _write_json_atomic(path: str, obj: Any, indent: Optional[Union[int, str]] = None) -> None:
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=indent)
+        json.dump(obj, f, **_json_dump_kwargs(indent))
     os.replace(tmp, path)
 
 

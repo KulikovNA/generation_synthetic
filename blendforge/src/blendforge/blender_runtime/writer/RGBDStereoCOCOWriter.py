@@ -30,14 +30,14 @@ def write_coco_with_stereo_depth_annotations(
     instance_attribute_maps: List[List[dict]],
     colors: List[np.ndarray],
     depths_m: List[np.ndarray],
-    depth_effective_m: List[np.ndarray],
-    depth_random_m: List[np.ndarray],
+    depth_effective_m: Optional[List[np.ndarray]],
+    depth_random_m: Optional[List[np.ndarray]],
     *,
     color_file_format: str = "JPEG",
     append_to_existing_output: bool = True,
     jpg_quality: int = 95,
     file_prefix: Optional[str] = None,
-    indent: Optional[int] = 2,
+    indent: Optional[int] = None,
     supercategory: str = "coco_annotations",
     ir_left_effective: Optional[List[np.ndarray]] = None,
     ir_right_effective: Optional[List[np.ndarray]] = None,
@@ -45,7 +45,7 @@ def write_coco_with_stereo_depth_annotations(
     ir_right_random: Optional[List[np.ndarray]] = None,
     depth_unit: str = "mm",
     depth_scale_mm: float = 1.0,
-) -> None:
+) -> Dict[str, Any]:
     writer = RGBDStereoCOCOWriter(
         output_dir=output_dir,
         color_file_format=color_file_format,
@@ -60,7 +60,7 @@ def write_coco_with_stereo_depth_annotations(
         indent=(indent if indent is not None else 2),
     )
 
-    writer.write_rgbd_coco(
+    return writer.write_rgbd_coco(
         colors=colors,
         instance_segmaps=instance_segmaps,
         instance_attribute_maps=instance_attribute_maps,
@@ -95,7 +95,7 @@ class RGBDStereoCOCOWriter:
         jpg_quality: int = 95,
         append_to_existing_output: bool = True,
         indent: Optional[Union[int, str]] = None,
-    ) -> None:
+    ) -> Dict[str, Any]:
         self.output_dir = output_dir
         self.color_file_format = color_file_format
         self.jpg_quality = int(jpg_quality)
@@ -169,8 +169,8 @@ class RGBDStereoCOCOWriter:
         instance_segmaps: List[np.ndarray],
         instance_attribute_maps: List[List[dict]],
         depth_m: List[np.ndarray],
-        depth_effective_m: List[np.ndarray],
-        depth_random_m: List[np.ndarray],
+        depth_effective_m: Optional[List[np.ndarray]],
+        depth_random_m: Optional[List[np.ndarray]],
         ir_left_effective: Optional[List[np.ndarray]] = None,
         ir_right_effective: Optional[List[np.ndarray]] = None,
         ir_left_random: Optional[List[np.ndarray]] = None,
@@ -188,11 +188,16 @@ class RGBDStereoCOCOWriter:
             len(instance_segmaps),
             len(instance_attribute_maps),
             len(depth_m),
-            len(depth_effective_m),
-            len(depth_random_m),
         ]
         if any(length != n for length in expected_lengths):
             raise ValueError("Input lists length mismatch")
+
+        for name, seq in [
+            ("depth_effective_m", depth_effective_m),
+            ("depth_random_m", depth_random_m),
+        ]:
+            if seq is not None and len(seq) != n:
+                raise ValueError(f"{name} length mismatch")
 
         for name, seq in [
             ("ir_left_effective", ir_left_effective),
@@ -231,9 +236,11 @@ class RGBDStereoCOCOWriter:
 
         visited_cat_ids = {int(c["id"]) for c in coco.get("categories", [])}
         next_ann_id = ann_offset + 1
+        image_ids: List[int] = []
 
         for frame_idx in range(n):
             img_id = frame_idx + image_offset
+            image_ids.append(int(img_id))
             stem = f"{img_id:06d}" if file_prefix is None else f"{file_prefix}{img_id:06d}"
 
             rgb_ext = "jpg" if self.color_file_format.upper() in ["JPG", "JPEG"] else "png"
@@ -253,14 +260,16 @@ class RGBDStereoCOCOWriter:
                 os.path.join(self.output_dir, depth_rel),
                 meters_to_depth_u16(depth_m[frame_idx], depth_scale_mm),
             )
-            _save_png_u16(
-                os.path.join(self.output_dir, depth_effective_rel),
-                meters_to_depth_u16(depth_effective_m[frame_idx], depth_scale_mm),
-            )
-            _save_png_u16(
-                os.path.join(self.output_dir, depth_random_rel),
-                meters_to_depth_u16(depth_random_m[frame_idx], depth_scale_mm),
-            )
+            if depth_effective_m is not None:
+                _save_png_u16(
+                    os.path.join(self.output_dir, depth_effective_rel),
+                    meters_to_depth_u16(depth_effective_m[frame_idx], depth_scale_mm),
+                )
+            if depth_random_m is not None:
+                _save_png_u16(
+                    os.path.join(self.output_dir, depth_random_rel),
+                    meters_to_depth_u16(depth_random_m[frame_idx], depth_scale_mm),
+                )
 
             ir_fields: Dict[str, str] = {}
             if ir_left_effective is not None:
@@ -328,13 +337,15 @@ class RGBDStereoCOCOWriter:
             img_entry.update({
                 "depth_file": depth_rel,
                 "depth_inpainted_file": depth_rel,
-                "depth_effective_file": depth_effective_rel,
-                "depth_random_file": depth_random_rel,
                 "depth_unit": str(depth_unit),
                 "depth_scale": float(depth_scale_mm),
                 "depth_scale_m": float(depth_scale_mm) / 1000.0,
                 "instances_mask_file": masks_rel,
             })
+            if depth_effective_m is not None:
+                img_entry["depth_effective_file"] = depth_effective_rel
+            if depth_random_m is not None:
+                img_entry["depth_random_file"] = depth_random_rel
             img_entry.update(ir_fields)
             coco["images"].append(img_entry)
 
@@ -389,3 +400,6 @@ class RGBDStereoCOCOWriter:
 
         coco["categories"] = sorted(coco["categories"], key=lambda c: int(c["id"]))
         _write_json_atomic(self.coco_path, coco, indent=self.indent)
+        return {
+            "image_ids": image_ids,
+        }

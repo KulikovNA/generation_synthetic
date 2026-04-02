@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import random
+import uuid
 
 import numpy as np
+import bpy
 
 from blendforge.blender_runtime.camera.ActiveStereoProjectorRuntime import (
     get_mount_world_pose,
@@ -66,7 +68,7 @@ def _resolve_non_overlap_min_sep(cfg_section, dot_radius_px: float, requested_mi
     return float(effective_min_sep_px), info
 
 
-def build_random_projector_config(rs, overrides, cfg) -> tuple[dict, dict]:
+def build_random_projector_config(rs, overrides, cfg) -> dict:
     base_cfg = resolve_projector_runtime_config(rs, overrides, fallback_left_stream="IR_LEFT").to_dict()
     section = getattr(cfg, "random_projector_pattern", None)
 
@@ -81,7 +83,7 @@ def build_random_projector_config(rs, overrides, cfg) -> tuple[dict, dict]:
     dot_count = _sample_from_range(_cfg_get(section, "dot_count_range", [4000, 7000]), cast=int)
     dot_radius_px = _sample_from_range(_cfg_get(section, "dot_radius_px_range", [1.0, 2.0]), cast=float)
     requested_min_sep_px = _sample_from_range(_cfg_get(section, "min_sep_px_range", [3.0, 5.0]), cast=float)
-    min_sep_px, non_overlap_info = _resolve_non_overlap_min_sep(section, dot_radius_px, requested_min_sep_px)
+    min_sep_px, _non_overlap_info = _resolve_non_overlap_min_sep(section, dot_radius_px, requested_min_sep_px)
 
     dot_sigma_range = _cfg_get(section, "dot_sigma_px_range", None)
     dot_sigma_px = None
@@ -96,20 +98,7 @@ def build_random_projector_config(rs, overrides, cfg) -> tuple[dict, dict]:
     base_cfg["pattern_min_sep_px"] = float(min_sep_px)
     base_cfg["pattern_dot_sigma_px"] = dot_sigma_px
 
-    sampled = {
-        "seed_mode": seed_mode,
-        "pattern_seed": int(pattern_seed),
-        "dot_count": int(dot_count),
-        "dot_radius_px": float(dot_radius_px),
-        "min_sep_px": float(min_sep_px),
-        "dot_sigma_px": None if dot_sigma_px is None else float(dot_sigma_px),
-        "pattern_width": int(base_cfg["pattern_width"]),
-        "pattern_height": int(base_cfg["pattern_height"]),
-        "fov_h_deg": float(base_cfg["fov_h_deg"]),
-        "fov_v_deg": float(base_cfg["fov_v_deg"]),
-    }
-    sampled.update(non_overlap_info)
-    return base_cfg, sampled
+    return base_cfg
 
 
 def render_stereo_branch_pair(
@@ -119,6 +108,8 @@ def render_stereo_branch_pair(
     overrides,
     stereo_branch: str,
     cfg,
+    output_dir: str | None = None,
+    file_prefix_base: str | None = None,
 ):
     right_pose = get_stream_world_pose_from_anchor(rs, "IR_RIGHT", "IR_LEFT", left_pose)
     mount_world_pose = get_mount_world_pose(
@@ -128,53 +119,56 @@ def render_stereo_branch_pair(
         anchor_world_pose=left_pose,
     )
 
-    mount = projector_util.get_or_create_mount_empty(f"rs_projector_mount_{stereo_branch}")
+    render_uid = uuid.uuid4().hex[:12]
+    mount_name = f"rs_projector_mount_{stereo_branch}_{render_uid}"
+    socket_name = f"rs_projector_socket_{stereo_branch}_{render_uid}"
+    mount = projector_util.get_or_create_mount_empty(mount_name)
 
     if stereo_branch == "effective":
         projector_cfg = resolve_projector_runtime_config(rs, overrides, fallback_left_stream="IR_LEFT").to_dict()
-        sampled_pattern = {
-            "branch": "effective",
-            "pattern_width": int(projector_cfg["pattern_width"]),
-            "pattern_height": int(projector_cfg["pattern_height"]),
-            "fov_h_deg": float(projector_cfg["fov_h_deg"]),
-            "fov_v_deg": float(projector_cfg["fov_v_deg"]),
-            "pattern_path": projector_cfg.get("pattern_path"),
-        }
     elif stereo_branch == "random_pattern":
-        projector_cfg, sampled_pattern = build_random_projector_config(rs, overrides, cfg)
-        sampled_pattern["branch"] = "random_pattern"
+        projector_cfg = build_random_projector_config(rs, overrides, cfg)
     else:
         raise ValueError(f"Unsupported stereo_branch: {stereo_branch}")
 
-    left_render = render_single_stream_with_projector(
-        rs,
-        "IR_LEFT",
-        left_pose,
-        mount,
-        mount_world_pose,
-        projector_cfg,
-        socket_name=f"rs_projector_socket_{stereo_branch}",
-    )
-    right_render = render_single_stream_with_projector(
-        rs,
-        "IR_RIGHT",
-        right_pose,
-        mount,
-        mount_world_pose,
-        projector_cfg,
-        socket_name=f"rs_projector_socket_{stereo_branch}",
-    )
+    try:
+        left_render = render_single_stream_with_projector(
+            rs,
+            "IR_LEFT",
+            left_pose,
+            mount,
+            mount_world_pose,
+            projector_cfg,
+            socket_name=socket_name,
+            output_dir=output_dir,
+            file_prefix=file_prefix_base,
+        )
+        right_render = render_single_stream_with_projector(
+            rs,
+            "IR_RIGHT",
+            right_pose,
+            mount,
+            mount_world_pose,
+            projector_cfg,
+            socket_name=socket_name,
+            output_dir=output_dir,
+            file_prefix=file_prefix_base,
+        )
+    finally:
+        socket_obj = bpy.data.objects.get(socket_name)
+        if socket_obj is not None:
+            bpy.data.objects.remove(socket_obj, do_unlink=True)
+        mount_obj = bpy.data.objects.get(mount_name)
+        if mount_obj is not None:
+            bpy.data.objects.remove(mount_obj, do_unlink=True)
 
     return {
         "left_colors": left_render["colors"],
         "right_colors": right_render["colors"],
         "left_depth_m": left_render["depth"],
-        "projector_cfg": projector_cfg,
-        "projector_pattern_rgba": left_render["pattern_rgba"],
         "left_world_pose": left_pose,
         "right_world_pose": right_pose,
         "mount_world_pose": mount_world_pose,
-        "sampled_pattern": sampled_pattern,
     }
 
 

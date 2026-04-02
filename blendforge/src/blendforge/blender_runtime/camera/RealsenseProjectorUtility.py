@@ -3,11 +3,14 @@
 import blenderproc as bproc
 
 import math
+import os
+import uuid
+import cv2
 import numpy as np
 import bpy
 
 from mathutils import Matrix
-
+from blenderproc.python.utility.Utility import Utility
 from blendforge.blender_runtime.camera.RealsenseProfileLoader import RealSenseProfile
 from blendforge.blender_runtime.camera.ProjectorPatternUtility import (
     apply_pattern_postprocess,
@@ -119,31 +122,118 @@ def _get_projector_texture_nodes(proj):
     ]
 
 
-def assign_unique_projector_pattern_image(proj, pattern_img: np.ndarray, *, image_name: str):
-    tex_nodes = _get_projector_texture_nodes(proj)
-    if len(tex_nodes) != 1:
-        raise RuntimeError(
-            f"Expected exactly one projector TEX_IMAGE node with label 'Texture Image', found {len(tex_nodes)}."
+def _iter_projector_light_objects():
+    for obj in bpy.data.objects:
+        if getattr(obj, "type", None) != "LIGHT":
+            continue
+        light_data = getattr(obj, "data", None)
+        node_tree = getattr(light_data, "node_tree", None)
+        if node_tree is None:
+            continue
+        has_projector_tex = any(
+            n.type == "TEX_IMAGE" and getattr(n, "label", "") == "Texture Image"
+            for n in node_tree.nodes
         )
+        if has_projector_tex:
+            yield obj
 
-    img = bpy.data.images.new(
-        name=image_name,
-        width=int(pattern_img.shape[1]),
-        height=int(pattern_img.shape[0]),
-        alpha=True,
-    )
+
+def activate_only_projector_light(proj) -> dict:
+    current = proj.blender_obj
+    visible = []
+    hidden = []
+    for obj in _iter_projector_light_objects():
+        keep_visible = obj == current
+        obj.hide_render = not keep_visible
+        target = visible if keep_visible else hidden
+        target.append(str(obj.name))
+    bpy.context.view_layer.update()
+    return {
+        "visible": visible,
+        "hidden": hidden,
+        "total": len(visible) + len(hidden),
+    }
+
+
+def _is_default_projector_pattern_image(img) -> bool:
+    name = str(getattr(img, "name", ""))
+    return name == "pattern" or name.startswith("pattern.")
+
+
+def cleanup_orphan_default_projector_images():
+    stale = [
+        img for img in bpy.data.images
+        if _is_default_projector_pattern_image(img) and int(getattr(img, "users", 0)) == 0
+    ]
+    for img in stale:
+        bpy.data.images.remove(img)
+
+
+def _cleanup_projector_images_on_object(light_obj):
+    light_data = getattr(light_obj, "data", None)
+    node_tree = getattr(light_data, "node_tree", None)
+    if node_tree is None:
+        return
+    for node in node_tree.nodes:
+        if node.type != "TEX_IMAGE" or getattr(node, "label", "") != "Texture Image":
+            continue
+        img = getattr(node, "image", None)
+        node.image = None
+        if img is not None and int(getattr(img, "users", 0)) == 0:
+            temp_path = img.get("projector_temp_path") if hasattr(img, "get") else None
+            bpy.data.images.remove(img)
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+
+def _to_rgba_u8(pattern_img: np.ndarray) -> np.ndarray:
     pixels = np.asarray(pattern_img)
     if pixels.dtype == np.uint8:
-        pixels = pixels.astype(np.float32) / 255.0
+        out = pixels
     else:
         pixels = pixels.astype(np.float32, copy=False)
         if float(pixels.max()) > 1.0:
             pixels = np.clip(pixels, 0.0, 255.0) / 255.0
         else:
             pixels = np.clip(pixels, 0.0, 1.0)
-    img.pixels = pixels.ravel()
+        out = (pixels * 255.0 + 0.5).astype(np.uint8)
 
-    # BlenderProc 2.7.1 binds bpy.data.images['pattern'] inside setup_as_projector(),
+    if out.ndim != 3 or out.shape[2] != 4:
+        raise ValueError(f"Projector pattern must be RGBA [H,W,4], got shape {out.shape}")
+    return np.ascontiguousarray(out)
+
+
+def _create_file_backed_projector_image(pattern_img: np.ndarray, *, image_name: str):
+    rgba_u8 = _to_rgba_u8(pattern_img)
+    temp_root = Utility.get_temporary_directory() or "/tmp"
+    pattern_dir = os.path.join(temp_root, "projector_pattern_cache")
+    os.makedirs(pattern_dir, exist_ok=True)
+    pattern_path = os.path.join(pattern_dir, f"{image_name}_{uuid.uuid4().hex}.png")
+    bgra_u8 = cv2.cvtColor(rgba_u8, cv2.COLOR_RGBA2BGRA)
+    if not cv2.imwrite(pattern_path, bgra_u8):
+        raise RuntimeError(f"Failed to write temporary projector pattern: {pattern_path}")
+    img = bpy.data.images.load(pattern_path, check_existing=False)
+    img.name = image_name
+    try:
+        img.colorspace_settings.name = "Non-Color"
+    except Exception:
+        pass
+    img["projector_temp_path"] = pattern_path
+    return img
+
+
+def assign_unique_projector_pattern_image(proj, pattern_img: np.ndarray, *, image_name: str):
+    tex_nodes = _get_projector_texture_nodes(proj)
+    if len(tex_nodes) != 1:
+        raise RuntimeError(
+            f"Expected exactly one projector TEX_IMAGE node with label 'Texture Image', found {len(tex_nodes)}."
+        )
+    img = _create_file_backed_projector_image(pattern_img, image_name=image_name)
+
+    # BlenderProc binds bpy.data.images['pattern'] inside setup_as_projector(),
     # so replace that shared datablock with a projector-specific one.
     tex_nodes[0].image = img
     return img
@@ -154,7 +244,13 @@ def cleanup_projector_pattern_images(proj):
         img = getattr(node, "image", None)
         node.image = None
         if img is not None and img.users == 0:
+            temp_path = img.get("projector_temp_path") if hasattr(img, "get") else None
             bpy.data.images.remove(img)
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
 
 def _cfg_get(config, key: str, default=None):
@@ -191,6 +287,102 @@ def attach_socket_to_mount(socket_obj, mount_obj, T_mount_from_projector_blender
     socket_obj.matrix_parent_inverse = Matrix.Identity(4)
     socket_obj.matrix_local = Matrix(np.asarray(T_mount_from_projector_blender, dtype=np.float64).tolist())
     return socket_obj
+
+
+def setup_projector_local(proj, pattern: np.ndarray, *, image_name: str, frame=None):
+    cam_ob = bpy.context.scene.camera
+    fov = cam_ob.data.angle
+
+    focal_length = 2 * np.tan(fov / 2)
+    aspect_ratio = bpy.context.scene.render.resolution_y / bpy.context.scene.render.resolution_x
+
+    proj.blender_obj.constraints.new("COPY_TRANSFORMS")
+    proj.blender_obj.constraints["Copy Transforms"].target = cam_ob
+
+    proj.blender_obj.data.use_nodes = True
+    proj.blender_obj.data.shadow_soft_size = 0
+    proj.blender_obj.data.spot_size = 3.14159
+    proj.blender_obj.data.cycles.cast_shadow = False
+
+    nodes = proj.blender_obj.data.node_tree.nodes
+    links = proj.blender_obj.data.node_tree.links
+
+    node_ox = nodes.get("Emission")
+
+    image_data = bpy.data.images.new(
+        str(image_name),
+        width=int(pattern.shape[1]),
+        height=int(pattern.shape[0]),
+        alpha=True,
+    )
+    try:
+        image_data.colorspace_settings.name = "Non-Color"
+    except Exception:
+        pass
+    pixels = np.asarray(pattern, dtype=np.float32)
+    if np.issubdtype(np.asarray(pattern).dtype, np.uint8):
+        pixels = pixels / 255.0
+    image_data.pixels = pixels.ravel()
+
+    node_pattern = nodes.new(type="ShaderNodeTexImage")
+    node_pattern.label = "Texture Image"
+    node_pattern.image = image_data
+    node_pattern.extension = "CLIP"
+    node_pattern.interpolation = "Closest"
+
+    node_coord = nodes.new(type="ShaderNodeTexCoord")
+    node_coord.label = "Texture Coordinate"
+
+    f_value = nodes.new(type="ShaderNodeValue")
+    f_value.label = "Focal Length"
+    f_value.outputs[0].default_value = focal_length
+
+    fr_value = nodes.new(type="ShaderNodeValue")
+    fr_value.label = "Focal Length * Ratio"
+    fr_value.outputs[0].default_value = focal_length * aspect_ratio
+
+    divide1 = nodes.new(type="ShaderNodeMath")
+    divide1.label = "X / ZF"
+    divide1.operation = "DIVIDE"
+
+    divide2 = nodes.new(type="ShaderNodeMath")
+    divide2.label = "Y / ZFr"
+    divide2.operation = "DIVIDE"
+
+    multiply1 = nodes.new(type="ShaderNodeMath")
+    multiply1.label = "Z * F"
+    multiply1.operation = "MULTIPLY"
+
+    multiply2 = nodes.new(type="ShaderNodeMath")
+    multiply2.label = "Z * Fr"
+    multiply2.operation = "MULTIPLY"
+
+    center_image = nodes.new(type="ShaderNodeVectorMath")
+    center_image.operation = "ADD"
+    center_image.label = "Offset"
+    center_image.inputs[1].default_value[0] = 0.5
+    center_image.inputs[1].default_value[1] = 0.5
+
+    xyz_components = nodes.new(type="ShaderNodeSeparateXYZ")
+    combine_xyz = nodes.new(type="ShaderNodeCombineXYZ")
+
+    links.new(node_pattern.outputs["Color"], node_ox.inputs["Color"])
+    links.new(node_coord.outputs["Normal"], xyz_components.inputs["Vector"])
+    links.new(f_value.outputs[0], multiply1.inputs[1])
+    links.new(xyz_components.outputs["Z"], multiply1.inputs[0])
+    links.new(fr_value.outputs[0], multiply2.inputs[1])
+    links.new(xyz_components.outputs["Z"], multiply2.inputs[0])
+    links.new(xyz_components.outputs["X"], divide1.inputs[0])
+    links.new(multiply1.outputs[0], divide1.inputs[1])
+    links.new(xyz_components.outputs["Y"], divide2.inputs[0])
+    links.new(multiply2.outputs[0], divide2.inputs[1])
+    links.new(divide1.outputs[0], combine_xyz.inputs["X"])
+    links.new(divide2.outputs[0], combine_xyz.inputs["Y"])
+    links.new(combine_xyz.outputs["Vector"], center_image.inputs[0])
+    links.new(center_image.outputs["Vector"], node_pattern.inputs["Vector"])
+
+    Utility.insert_keyframe(proj.blender_obj.data, "use_projector", frame)
+    return image_data
 
 
 def resolve_projector_target(
@@ -236,6 +428,7 @@ def create_projector_from_runtime_config(
     config,
     *,
     socket_name: str = "rs_projector_socket_runtime",
+    image_name: str | None = None,
 ):
     pattern_img = load_or_generate_projector_pattern(
         path=_cfg_get(config, "pattern_path"),
@@ -257,11 +450,12 @@ def create_projector_from_runtime_config(
     proj = bproc.types.Light()
     proj.set_type("SPOT")
     proj.set_energy(float(_cfg_get(config, "energy")))
+    proj.set_color(tuple(float(v) for v in _cfg_get(config, "color_rgb", (1.0, 1.0, 1.0))))
     proj.setup_as_projector(pattern_img)
     assign_unique_projector_pattern_image(
         proj,
         pattern_img,
-        image_name=f"{socket_name}_pattern",
+        image_name=f"{socket_name}_pattern" if image_name is None else str(image_name),
     )
 
     T_mount_from_projector = _cfg_get(config, "local_transform_blender_4x4_final", None)
@@ -351,9 +545,12 @@ def create_realsense_ir_projector(
     proj.set_type("SPOT")
     proj.set_energy(float(energy_v))
 
-    # Let BlenderProc build the correct node tree + texture wiring.
-    # It will *initially* use camera fov, but then we override the nodes.
     proj.setup_as_projector(pattern_img)
+    assign_unique_projector_pattern_image(
+        proj,
+        pattern_img,
+        image_name="legacy_realsense_projector_pattern",
+    )
 
     # Re-target COPY_TRANSFORMS constraint to mount/socket, not the active camera
     target_obj, _binding = resolve_projector_target(rs, mount_obj)

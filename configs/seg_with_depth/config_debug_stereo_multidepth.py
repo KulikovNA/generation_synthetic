@@ -11,8 +11,8 @@ blenderproc_retryable_exit_codes = [245]
 
 poses_cam = 2
 runs_one_fracture = 1
-runs_process = 2
-dataset_type = "test"
+runs_process = 20
+dataset_type = "train"
 
 dataset_parent_path = "prepared"
 bop_dataset_name = "differBig"
@@ -23,7 +23,7 @@ cc_textures = dict(
     cc_textures_object_path="resources/textures_1k_modules",
 )
 
-output_dir = "output/seg_with_depth_stereo_multidepth/differBig/2026-03-28"
+output_dir = "output/seg_with_depth_debug_stereo_multidepth"
 save_config = True
 
 probability_drop = 0.50
@@ -35,9 +35,17 @@ jpg_quality = 95
 depth_scale_mm = 1.0
 coco_json_indent = None  # None -> compact JSON, 2 -> pretty JSON
 
+debug_output = dict(
+    raw_color_file_format="PNG",
+    raw_jpg_quality=95,
+    depth_save_mode="preview_gray",  # one of: "u16", "preview_gray"
+    coco_gt_depth_save_mode="preview_gray",  # affects coco_data/depth
+    coco_matched_depth_save_mode="preview_gray",  # affects coco_data/depth_effective and depth_random
+)
+
 rgb_render = dict(
-    light_energy_range=[300.0, 1200.0],
-    max_amount_of_samples_range=[50, 1000],
+    light_energy_range=[600.0, 1200.0],
+    max_amount_of_samples_range=[1000, 1000],
 )
 
 stereo_render = dict(

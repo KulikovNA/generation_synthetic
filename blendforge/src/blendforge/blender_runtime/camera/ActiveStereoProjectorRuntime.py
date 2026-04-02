@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Optional
+import uuid
 
 import blenderproc as bproc
+import bpy
 import numpy as np
 from mathutils import Euler, Matrix, Vector
+from blenderproc.python.utility.GlobalStorage import GlobalStorage
 
 from blendforge.blender_runtime.camera.RealsenseProfileLoader import RealSenseProfile
 from blendforge.blender_runtime.camera import RealsenseProjectorUtility as projector_util
@@ -25,6 +28,7 @@ class ProjectorOverrides:
     flip_v: bool = False
     dot_sigma_px: Optional[float] = None
     projector_energy: Optional[float] = None
+    projector_color_rgb: Optional[tuple[float, float, float]] = None
 
     def has_transform_override(self) -> bool:
         return any(
@@ -53,6 +57,7 @@ class ProjectorRuntimeConfig:
     pattern_dot_sigma_px: Optional[float]
     dot_count: int
     energy: float
+    color_rgb: tuple[float, float, float]
     fov_h_deg: float
     fov_v_deg: float
     mount_frame: str
@@ -72,6 +77,15 @@ def _override_value(overrides: Optional[Any], name: str, default: Any) -> Any:
     if overrides is None:
         return default
     return getattr(overrides, name, default)
+
+
+def _normalize_color_rgb(value: Optional[Any], default=(1.0, 1.0, 1.0)) -> tuple[float, float, float]:
+    raw = default if value is None else value
+    arr = np.asarray(raw, dtype=np.float64).reshape(-1)
+    if arr.size != 3:
+        raise ValueError(f"Projector color must contain exactly 3 values, got {arr.tolist()}")
+    arr = np.clip(arr, 0.0, 1.0)
+    return (float(arr[0]), float(arr[1]), float(arr[2]))
 
 
 def matrix_from_translation_euler_xyz(
@@ -149,6 +163,7 @@ def resolve_projector_runtime_config(
             pattern_dot_sigma_px=getattr(pr, "pattern_dot_sigma_px", None),
             dot_count=int(pr.dot_count),
             energy=float(pr.energy),
+            color_rgb=_normalize_color_rgb(projector_metadata.get("color_rgb", (1.0, 1.0, 1.0))),
             fov_h_deg=float(np.rad2deg(pr.fov_h_rad)),
             fov_v_deg=float(np.rad2deg(pr.fov_v_rad)),
             mount_frame=rs.get_projector_mount_frame(),
@@ -174,6 +189,7 @@ def resolve_projector_runtime_config(
             pattern_dot_sigma_px=None,
             dot_count=25600,
             energy=3000.0,
+            color_rgb=(1.0, 1.0, 1.0),
             fov_h_deg=float(np.rad2deg(fov_h_rad)),
             fov_v_deg=float(np.rad2deg(fov_v_rad)),
             mount_frame=fallback_left_stream,
@@ -193,6 +209,7 @@ def resolve_projector_runtime_config(
     final = delta @ np.asarray(cfg.local_transform_blender_4x4_base, dtype=np.float64)
 
     projector_energy = _override_value(overrides, "projector_energy", None)
+    projector_color_rgb = _override_value(overrides, "projector_color_rgb", None)
     dot_sigma_px = _override_value(overrides, "dot_sigma_px", None)
     fov_x_override = _override_value(overrides, "proj_fov_x_deg", None)
     fov_y_override = _override_value(overrides, "proj_fov_y_deg", None)
@@ -209,6 +226,7 @@ def resolve_projector_runtime_config(
         pattern_dot_sigma_px=cfg.pattern_dot_sigma_px if dot_sigma_px is None else float(dot_sigma_px),
         dot_count=cfg.dot_count,
         energy=cfg.energy if projector_energy is None else float(projector_energy),
+        color_rgb=cfg.color_rgb if projector_color_rgb is None else _normalize_color_rgb(projector_color_rgb),
         fov_h_deg=cfg.fov_h_deg if fov_x_override is None else float(fov_x_override),
         fov_v_deg=cfg.fov_v_deg if fov_y_override is None else float(fov_y_override),
         mount_frame=cfg.mount_frame,
@@ -222,6 +240,34 @@ def resolve_projector_runtime_config(
     )
 
 
+def _read_render_result_colors() -> Optional[np.ndarray]:
+    img = bpy.data.images.get("Render Result")
+    if img is None:
+        return None
+    width = int(img.size[0])
+    height = int(img.size[1])
+    if width <= 0 or height <= 0:
+        return None
+    try:
+        pixels = np.asarray(img.pixels[:], dtype=np.float32)
+    except Exception:
+        return None
+    if pixels.size != width * height * 4:
+        return None
+    rgba = pixels.reshape(height, width, 4)
+    return np.asarray(rgba[:, :, :3], dtype=np.float32).copy()
+
+
+def _unregister_output_key(output_key: str) -> None:
+    if not GlobalStorage.is_in_storage("output"):
+        return
+    outputs = [
+        item for item in GlobalStorage.get("output")
+        if str(item.get("key", "")) != str(output_key)
+    ]
+    GlobalStorage.set("output", outputs)
+
+
 def render_single_stream_with_projector(
     rs: RealSenseProfile,
     stream_name: str,
@@ -231,25 +277,58 @@ def render_single_stream_with_projector(
     projector_cfg: ProjectorRuntimeConfig | Dict[str, Any],
     *,
     socket_name: str = "rs_projector_socket_runtime",
+    output_dir: Optional[str] = None,
+    file_prefix: Optional[str] = None,
 ) -> Dict[str, Any]:
     bproc.utility.reset_keyframes()
     rs.set_bproc_intrinsics(stream_name)
     bproc.camera.add_camera_pose(np.asarray(world_pose, dtype=np.float64), frame=0)
     projector_util.animate_mount_from_cam2world(mount_obj, [np.asarray(mount_world_pose, dtype=np.float64)])
-    projector, pattern_img = projector_util.create_projector_from_runtime_config(
+    projector, _pattern_img = projector_util.create_projector_from_runtime_config(
         mount_obj,
         projector_cfg,
         socket_name=socket_name,
     )
+    render_output_key = None
     try:
-        data = bproc.renderer.render()
+        projector_util.activate_only_projector_light(projector)
+        render_uid = uuid.uuid4().hex[:12]
+        render_output_key = f"colors_active_stereo_{render_uid}"
+        render_file_prefix = f"{file_prefix or 'rgb_'}{socket_name}_{stream_name.lower()}_{render_uid}_"
+        render_kwargs: Dict[str, Any] = {
+            "file_prefix": render_file_prefix,
+            "output_key": render_output_key,
+            "load_keys": {render_output_key, "depth"},
+        }
+        if bpy.context.scene.render.film_transparent:
+            render_kwargs["keys_with_alpha_channel"] = {render_output_key}
+        if output_dir is not None:
+            render_kwargs["output_dir"] = output_dir
+        data = bproc.renderer.render(**render_kwargs)
+        file_colors = None
+        if render_output_key in data and data[render_output_key]:
+            file_colors = np.asarray(data[render_output_key][0]).copy()
+        render_result_colors = _read_render_result_colors()
+        if file_colors is not None:
+            colors = file_colors
+        elif render_result_colors is not None:
+            colors = render_result_colors
+        else:
+            raise RuntimeError(
+                "Active stereo render did not return color data from either the registered output "
+                f"'{render_output_key}' or Blender Render Result."
+            )
     finally:
+        try:
+            if render_output_key is not None:
+                _unregister_output_key(render_output_key)
+        except Exception:
+            pass
         projector_util.cleanup_projector_pattern_images(projector)
         projector.delete()
     return {
-        "colors": data["colors"][0],
-        "depth": None if "depth" not in data else data["depth"][0],
-        "pattern_rgba": pattern_img,
+        "colors": colors,
+        "depth": None if "depth" not in data else np.asarray(data["depth"][0], dtype=np.float32).copy(),
     }
 
 
@@ -272,31 +351,42 @@ def render_active_stereo_pair(
         anchor_world_pose=left_pose,
     )
 
-    mount = projector_util.get_or_create_mount_empty(mount_name)
+    render_uid = uuid.uuid4().hex[:12]
+    scoped_mount_name = f"{mount_name}_{render_uid}"
+    scoped_socket_name = f"{socket_name}_{render_uid}"
+    mount = projector_util.get_or_create_mount_empty(scoped_mount_name)
     projector_cfg = resolve_projector_runtime_config(
         rs,
         overrides,
         fallback_left_stream=left_stream,
     )
 
-    left_render = render_single_stream_with_projector(
-        rs,
-        left_stream,
-        left_pose,
-        mount,
-        mount_world_pose,
-        projector_cfg,
-        socket_name=socket_name,
-    )
-    right_render = render_single_stream_with_projector(
-        rs,
-        right_stream,
-        right_pose,
-        mount,
-        mount_world_pose,
-        projector_cfg,
-        socket_name=socket_name,
-    )
+    try:
+        left_render = render_single_stream_with_projector(
+            rs,
+            left_stream,
+            left_pose,
+            mount,
+            mount_world_pose,
+            projector_cfg,
+            socket_name=scoped_socket_name,
+        )
+        right_render = render_single_stream_with_projector(
+            rs,
+            right_stream,
+            right_pose,
+            mount,
+            mount_world_pose,
+            projector_cfg,
+            socket_name=scoped_socket_name,
+        )
+    finally:
+        socket_obj = bpy.data.objects.get(scoped_socket_name)
+        if socket_obj is not None:
+            bpy.data.objects.remove(socket_obj, do_unlink=True)
+        mount_obj = bpy.data.objects.get(scoped_mount_name)
+        if mount_obj is not None:
+            bpy.data.objects.remove(mount_obj, do_unlink=True)
 
     return {
         "left_colors": left_render["colors"],

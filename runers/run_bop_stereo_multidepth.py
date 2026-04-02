@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import shutil
 import subprocess
+import tempfile
 import traceback
 
 from blendforge.host.FiletoDict import Config
@@ -23,6 +24,12 @@ def env_generic(index_device, cfg):
     for process in range(cfg.parallel_process_on_one_gpu):
         cfg._add_new_item(index_device=str(index_device))
         cfg._add_new_item(process_id=str(process))
+        temp_dir_rgb = tempfile.mkdtemp(prefix=f"blender_rgb_id{cfg.index_device}ip{cfg.process_id}")
+        temp_dir_segmap = tempfile.mkdtemp(prefix=f"blender_segmap_id{cfg.index_device}ip{cfg.process_id}")
+        cfg._add_new_item(temp_dir_rgb=temp_dir_rgb)
+        cfg._add_new_item(temp_dir_segmap=temp_dir_segmap)
+        cfg._add_new_item(file_prefix_rgb=f"rgb_id{cfg.index_device}ip{cfg.process_id}_")
+        cfg._add_new_item(file_prefix_segmap=f"segmap_id{cfg.index_device}ip{cfg.process_id}_")
 
         print("__INPUT DATA__")
         print("#########################################")
@@ -38,18 +45,29 @@ def env_generic(index_device, cfg):
             "blenderproc run scenarios/bop/main_stereo_multidepth.py "
             f"--config_file {path_to_cfg}"
         )
-        process_on_gpu.append(multiprocessing.Process(target=run_proc, args=(cmd, env, cfg.runs_process)))
+        process_on_gpu.append(multiprocessing.Process(target=run_proc, args=(cmd, env, temp_dir_rgb, temp_dir_segmap, cfg.runs_process)))
 
     for process in process_on_gpu:
         process.start()
 
 
-def run_proc(cmd, env, runs_process):
+def check_and_remove_dir(dir_path):
+    if os.path.exists(dir_path):
+        shutil.rmtree(dir_path)
+        print(f"Директория {dir_path} была удалена")
+    else:
+        print(f"Директория {dir_path} была удалена ранее")
+
+
+def run_proc(cmd, env, temp_dir_rgb, temp_dir_segmap, runs_process):
     try:
         for _ in range(int(runs_process)):
             subprocess.run(cmd, env=env, shell=True, check=True)
     except Exception as e:
         print(f"Произошла ошибка: {e}")
+    finally:
+        check_and_remove_dir(temp_dir_rgb)
+        check_and_remove_dir(temp_dir_segmap)
 
 
 def create_models_folder(dataset_parent_path: str, output_dir: str, dataset: str):

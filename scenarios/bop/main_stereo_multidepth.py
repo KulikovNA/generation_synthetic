@@ -4,11 +4,10 @@
 import blenderproc as bproc
 
 import argparse
-import json
 import os
 import random
 import sys
-from pathlib import Path
+import copy
 
 import numpy as np
 from filelock import FileLock
@@ -113,11 +112,29 @@ def _prepare_objects_for_scene(sampled_objs, cfg):
     )
 
 
-def _render_color_frame(rs: RealSenseProfile, color_pose: np.ndarray):
+def _render_color_frame(rs: RealSenseProfile, color_pose: np.ndarray, *, output_dir=None, file_prefix=None):
     bproc.utility.reset_keyframes()
     rs.set_bproc_intrinsics("COLOR")
     bproc.camera.add_camera_pose(np.asarray(color_pose, dtype=np.float64), frame=0)
-    return bproc.renderer.render()
+    if output_dir is None and file_prefix is None:
+        data = bproc.renderer.render()
+    else:
+        render_kwargs = {}
+        if output_dir is not None:
+            render_kwargs["output_dir"] = output_dir
+        if file_prefix is not None:
+            render_kwargs["file_prefix"] = file_prefix
+        data = bproc.renderer.render(**render_kwargs)
+    safe = dict(data)
+    if "colors" in data:
+        safe["colors"] = [np.asarray(frame).copy() for frame in data["colors"]]
+    if "depth" in data:
+        safe["depth"] = [np.asarray(frame, dtype=np.float32).copy() for frame in data["depth"]]
+    if "instance_segmaps" in data:
+        safe["instance_segmaps"] = [np.asarray(frame).copy() for frame in data["instance_segmaps"]]
+    if "instance_attribute_maps" in data:
+        safe["instance_attribute_maps"] = copy.deepcopy(data["instance_attribute_maps"])
+    return safe
 
 
 def _align_depth_to_color(rs: RealSenseProfile, depth_rect_m: np.ndarray, *, depth_value_mode: str, splat_2x2: bool):
@@ -131,29 +148,6 @@ def _align_depth_to_color(rs: RealSenseProfile, depth_rect_m: np.ndarray, *, dep
     return np.asarray(depth_list[0], dtype=np.float32)
 
 
-def _save_frame_metadata(split_dir: Path, image_id: int, payload: dict) -> None:
-    meta_dir = split_dir / "stereo_meta"
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    (meta_dir / f"{image_id:06d}.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
-def _jsonify(obj):
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, (np.floating,)):
-        return float(obj)
-    if isinstance(obj, (np.integer,)):
-        return int(obj)
-    if isinstance(obj, dict):
-        return {str(k): _jsonify(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_jsonify(v) for v in obj]
-    return obj
-
-
 def main(argv=None):
     bproc.init()
     bproc.utility.reset_keyframes()
@@ -161,6 +155,8 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     args = parse_args(argv)
     cfg = Config(args.config_file)
+    file_prefix_rgb = str(getattr(cfg, "file_prefix_rgb", f"rgb_id{cfg.index_device}ip{cfg.process_id}_"))
+    file_prefix_segmap = str(getattr(cfg, "file_prefix_segmap", f"segmap_id{cfg.index_device}ip{cfg.process_id}_"))
 
     camera_profile_json = str(getattr(cfg, "camera_profile_json", "")).strip()
     if not camera_profile_json:
@@ -223,7 +219,10 @@ def main(argv=None):
             for pose_idx, (left_pose, color_pose) in enumerate(zip(rig_poses_ir_left, rig_poses_color)):
                 energy_cfg = sample_effective_energy_config(cfg)
                 render_sample_cfg = sample_render_sample_config(cfg)
-                overrides = ProjectorOverrides(projector_energy=float(energy_cfg["projector_energy"]))
+                overrides = ProjectorOverrides(
+                    projector_energy=float(energy_cfg["projector_energy"]),
+                    projector_color_rgb=tuple(float(v) for v in energy_cfg["projector_color_rgb"]),
+                )
 
                 effective_section = _get_branch_matcher_section(cfg, "effective")
                 random_section = _get_branch_matcher_section(cfg, "random")
@@ -244,28 +243,35 @@ def main(argv=None):
                         overrides=overrides,
                         stereo_branch="effective",
                         cfg=cfg,
+                        output_dir=cfg.temp_dir_rgb,
+                        file_prefix_base=file_prefix_rgb,
                     )
+                    left_ir_effective = rgb_to_intensity_u8(render_effective["left_colors"], mode=effective_mode)
+                    right_ir_effective = rgb_to_intensity_u8(render_effective["right_colors"], mode=effective_mode)
+                    left_ir_effective_saved = left_ir_effective.copy()
+                    right_ir_effective_saved = right_ir_effective.copy()
                     render_random = render_stereo_branch_pair(
                         rs,
                         left_pose=np.asarray(left_pose, dtype=np.float64),
                         overrides=overrides,
                         stereo_branch="random_pattern",
                         cfg=cfg,
+                        output_dir=cfg.temp_dir_rgb,
+                        file_prefix_base=file_prefix_rgb,
                     )
+                    left_ir_random = rgb_to_intensity_u8(render_random["left_colors"], mode=random_mode)
+                    right_ir_random = rgb_to_intensity_u8(render_random["right_colors"], mode=random_mode)
+                    left_ir_random_saved = left_ir_random.copy()
+                    right_ir_random_saved = right_ir_random.copy()
                 finally:
                     apply_lighting_energy(lighting_base_state, float(energy_cfg["rgb_light_energy"]))
-
-                left_ir_effective = rgb_to_intensity_u8(render_effective["left_colors"], mode=effective_mode)
-                right_ir_effective = rgb_to_intensity_u8(render_effective["right_colors"], mode=effective_mode)
-                left_ir_random = rgb_to_intensity_u8(render_random["left_colors"], mode=random_mode)
-                right_ir_random = rgb_to_intensity_u8(render_random["right_colors"], mode=random_mode)
 
                 stereo_effective = stereo_from_ir_pair(
                     rs,
                     left_stream="IR_LEFT",
                     right_stream="IR_RIGHT",
-                    left_ir_u8=left_ir_effective,
-                    right_ir_u8=right_ir_effective,
+                    left_ir_u8=left_ir_effective.copy(),
+                    right_ir_u8=right_ir_effective.copy(),
                     left_depth_gt_m=render_effective["left_depth_m"],
                     plane_distance_m=effective_plane_distance,
                     **effective_matcher_kwargs,
@@ -274,15 +280,20 @@ def main(argv=None):
                     rs,
                     left_stream="IR_LEFT",
                     right_stream="IR_RIGHT",
-                    left_ir_u8=left_ir_random,
-                    right_ir_u8=right_ir_random,
+                    left_ir_u8=left_ir_random.copy(),
+                    right_ir_u8=right_ir_random.copy(),
                     left_depth_gt_m=render_random["left_depth_m"],
                     plane_distance_m=random_plane_distance,
                     **random_matcher_kwargs,
                 )
 
                 bproc.renderer.set_max_amount_of_samples(int(render_sample_cfg["rgb_max_amount_of_samples"]))
-                data_rgb = _render_color_frame(rs, np.asarray(color_pose, dtype=np.float64))
+                data_rgb = _render_color_frame(
+                    rs,
+                    np.asarray(color_pose, dtype=np.float64),
+                    output_dir=cfg.temp_dir_rgb,
+                    file_prefix=file_prefix_rgb,
+                )
                 rgb = np.asarray(data_rgb["colors"][0])
                 depth_gt_rgb = np.asarray(data_rgb["depth"][0], dtype=np.float32)
 
@@ -307,10 +318,10 @@ def main(argv=None):
                         depth_gt=[depth_gt_rgb],
                         depth_effective=[depth_effective_rgb],
                         depth_random=[depth_random_rgb],
-                        ir_left_effective=[left_ir_effective] if save_ir_pairs else None,
-                        ir_right_effective=[right_ir_effective] if save_ir_pairs else None,
-                        ir_left_random=[left_ir_random] if save_ir_pairs else None,
-                        ir_right_random=[right_ir_random] if save_ir_pairs else None,
+                        ir_left_effective=[left_ir_effective_saved] if save_ir_pairs else None,
+                        ir_right_effective=[right_ir_effective_saved] if save_ir_pairs else None,
+                        ir_left_random=[left_ir_random_saved] if save_ir_pairs else None,
+                        ir_right_random=[right_ir_random_saved] if save_ir_pairs else None,
                         color_file_format=color_file_format,
                         dataset=cfg.bop_dataset_name,
                         split=split_name,
@@ -322,33 +333,6 @@ def main(argv=None):
                         annotation_unit=str(getattr(cfg, "annotation_unit", "mm")),
                     )
                     image_id = int(write_result["image_ids"][0])
-                    chunk_dir = Path(write_result["chunk_dirs"][0])
-                    _save_frame_metadata(
-                        chunk_dir,
-                        image_id,
-                        {
-                            "run_idx": run_idx,
-                            "pose_idx": pose_idx,
-                            "camera_profile_json": camera_profile_json,
-                            "energy_cfg": _jsonify(energy_cfg),
-                            "render_sample_cfg": _jsonify(render_sample_cfg),
-                            "depth_value_mode": depth_value_mode,
-                            "effective": {
-                                "matcher": _jsonify(effective_matcher_kwargs),
-                                "plane_distance_m": effective_plane_distance,
-                                "depth_stats": _jsonify(stereo_effective["depth_stats"]),
-                                "projector_cfg": _jsonify(render_effective["projector_cfg"]),
-                                "sampled_pattern": _jsonify(render_effective.get("sampled_pattern")),
-                            },
-                            "random": {
-                                "matcher": _jsonify(random_matcher_kwargs),
-                                "plane_distance_m": random_plane_distance,
-                                "depth_stats": _jsonify(stereo_random["depth_stats"]),
-                                "projector_cfg": _jsonify(render_random["projector_cfg"]),
-                                "sampled_pattern": _jsonify(render_random.get("sampled_pattern")),
-                            },
-                        },
-                    )
 
                 print(
                     "[BOP Stereo MultiDepth] "
