@@ -9,9 +9,9 @@ blenderproc_retry_backoff_multiplier = 2.0
 blenderproc_retry_backoff_jitter_sec = 10.0
 blenderproc_retryable_exit_codes = [245]
 
-poses_cam = 2
+poses_cam = 4
 runs_one_fracture = 1
-runs_process = 2
+runs_process = 4
 dataset_type = "test"
 
 dataset_parent_path = "prepared"

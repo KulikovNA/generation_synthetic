@@ -284,6 +284,135 @@ class Config:
         else:
             raise ValueError("dataset_parent_path не может быть пустым")
 
+    def _mode_is_fragment_template_registration(self) -> None:
+        print(self._data)
+        if self._data.get('dataset_parent_path'):
+            self._data['dataset_parent_path'] = self._get_absolute_path(self._data['dataset_parent_path'])
+        else:
+            raise ValueError("dataset_parent_path не может быть пустым")
+
+        if not self._data.get('bop_dataset_name'):
+            raise ValueError("bop_dataset_name не может быть пустым")
+
+        split = self._data.get('split', 'train')
+        if split not in ('train', 'val', 'test'):
+            raise ValueError("Parameter 'split' must be one of ['train', 'val', 'test'].")
+        self._data['split'] = split
+        self._data.setdefault('dataset_type', split)
+
+        splits = self._data.get('splits', None)
+        if splits is None:
+            split_cfg = {
+                'num_scenes': int(self._data.get('num_scenes', 1)),
+                'num_frames_per_scene': int(self._data.get('num_frames_per_scene', 1)),
+                'num_scene_workers': int(
+                    self._data.get(
+                        'num_scene_workers',
+                        self._data['num_gpus'] * self._data['parallel_process_on_one_gpu'],
+                    )
+                ),
+            }
+        else:
+            if split not in splits:
+                raise ValueError(f"Split '{split}' is not configured in splits.")
+            split_cfg = splits[split]
+        split_cfg.setdefault('num_scenes', int(self._data.get('num_scenes', 1)))
+        split_cfg.setdefault('num_frames_per_scene', int(self._data.get('num_frames_per_scene', 1)))
+        split_cfg.setdefault(
+            'num_scene_workers',
+            int(self._data.get('num_scene_workers', self._data['num_gpus'] * self._data['parallel_process_on_one_gpu'])),
+        )
+        if int(split_cfg['num_scenes']) < 1:
+            raise ValueError("num_scenes must be >= 1")
+        if int(split_cfg['num_frames_per_scene']) < 1:
+            raise ValueError("num_frames_per_scene must be >= 1")
+        if int(split_cfg['num_scene_workers']) < 1:
+            raise ValueError("num_scene_workers must be >= 1")
+
+        self._data['num_scenes'] = int(split_cfg['num_scenes'])
+        self._data['num_frames_per_scene'] = int(split_cfg['num_frames_per_scene'])
+        self._data['num_scene_workers'] = int(split_cfg['num_scene_workers'])
+
+        self._data.setdefault('scene_id_offset', 0)
+        self._data.setdefault('seed', 13)
+        self._data.setdefault('object_model_unit', 'cm')
+        self._data.setdefault('manifold', True)
+        self._data.setdefault('depth_scale_mm', 1.0)
+        self._data.setdefault('overwrite_scene', False)
+        self._data.setdefault('overwrite_models', False)
+        self._data.setdefault('visible_points_pixel_stride', 1)
+        self._data.setdefault('max_amount_of_samples', 50)
+
+        if 'object_selector' not in self._data:
+            values = self._data.get('object_ids', None)
+            if values is None:
+                values = [int(self._data.get('id_target_obj', 1))]
+            self._data['object_selector'] = {
+                'mode': 'category_id',
+                'values': values,
+            }
+
+        self._data.setdefault('fracture', {
+            'source_limit_and_count': 4,
+            'source_noise': 0.001,
+            'cell_scale': [1.0, 1.0, 1.0],
+            'margin': 0.001,
+            'fragment_scale': 0.05,
+            'max_attempts': 4,
+        })
+
+        self._data.setdefault('layout', {
+            'mode': 'drop',
+            'simulate_physics': True,
+            'max_pose_tries': 1000,
+            'min_simulation_time': 3,
+            'max_simulation_time': 35,
+            'check_object_interval': 2,
+            'substeps_per_frame': 30,
+            'solver_iters': 30,
+        })
+
+        self._data.setdefault('camera_sampling', {
+            'center': [0.0, 0.0, 0.1],
+            'poi': [0.0, 0.0, 0.0],
+            'radius_min': 0.4,
+            'radius_max': 1.0,
+            'elevation_min': 5,
+            'elevation_max': 89,
+            'rotation_factor': 11.0,
+        })
+
+        self._data.setdefault('render', {
+            'max_amount_of_samples': int(self._data.get('max_amount_of_samples', 50)),
+        })
+
+        self._data.setdefault('surface_labeling', {
+            'method': 'distance_and_normal_to_digital_twin',
+            'distance_threshold_m': 0.0005,
+            'normal_cos_threshold': 0.75,
+            'samples_per_face': 5,
+            'unknown_policy': 'ignore',
+            'cleanup_small_fracture_components': True,
+            'min_fracture_component_faces': 12,
+            'min_fracture_component_area': 0.0,
+            'small_component_shell_neighbor_ratio': 0.6,
+        })
+
+        self._data.setdefault('fragment_filter', {
+            'enabled': True,
+            'min_vertices': 20,
+            'min_faces': 0,
+            'ignore_reason': 'small_fragment',
+        })
+
+        self._data.setdefault('write_flags', {
+            'write_rgb': True,
+            'write_depth': True,
+            'write_instance_masks': True,
+            'write_surface_masks': True,
+            'write_visible_points': True,
+        })
+
     def _mode_is_bop_seg(self) -> None:
         print(self._data)
         if self._data['dataset_parent_path']:

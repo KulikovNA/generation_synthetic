@@ -292,9 +292,32 @@ def _depth_preview_gray(depth_m: np.ndarray) -> np.ndarray:
     return _to_u8_preview(inv, low=1.0, high=99.0)
 
 
+def _disparity_preview_gray(disp_px: np.ndarray) -> np.ndarray:
+    return _to_u8_preview(np.asarray(disp_px, dtype=np.float32), low=1.0, high=99.0)
+
+
 def _save_gray_png(path: Path, img_u8: np.ndarray) -> None:
     _ensure_dir(str(path.parent))
     cv2.imwrite(str(path), np.asarray(img_u8, dtype=np.uint8))
+
+
+def _save_debug_depth(path: Path, depth_m: np.ndarray, *, depth_scale_mm: float, save_mode: str) -> None:
+    depth = np.asarray(depth_m, dtype=np.float32)
+    if save_mode == "u16":
+        _save_png_u16(
+            str(path),
+            meters_to_depth_u16(
+                depth,
+                depth_scale_mm=float(depth_scale_mm),
+            ),
+        )
+    elif save_mode == "preview_gray":
+        _save_gray_png(path, _depth_preview_gray(depth))
+    else:
+        raise ValueError(
+            f"Unsupported debug_output.depth_save_mode={save_mode!r}. "
+            "Expected one of: 'u16', 'preview_gray'."
+        )
 
 
 def _peek_next_coco_image_id(coco_out_dir: Path) -> int:
@@ -313,14 +336,17 @@ def _peek_next_coco_image_id(coco_out_dir: Path) -> int:
 
 
 def _build_debug_dirs(coco_out_dir: Path) -> dict[str, Path]:
-    return {
-        "raw_left_effective": coco_out_dir / "raw_left_effective",
-        "raw_right_effective": coco_out_dir / "raw_right_effective",
-        "raw_left_random": coco_out_dir / "raw_left_random",
-        "raw_right_random": coco_out_dir / "raw_right_random",
-        "depth_left_rect_effective": coco_out_dir / "depth_left_rect_effective",
-        "depth_left_rect_random": coco_out_dir / "depth_left_rect_random",
-    }
+    debug_dirs = {}
+    for branch_name in ("effective", "random"):
+        debug_dirs[f"raw_left_{branch_name}"] = coco_out_dir / f"raw_left_{branch_name}"
+        debug_dirs[f"raw_right_{branch_name}"] = coco_out_dir / f"raw_right_{branch_name}"
+        debug_dirs[f"depth_left_rect_{branch_name}"] = coco_out_dir / f"depth_left_rect_{branch_name}"
+        debug_dirs[f"disp_left_rect_raw_{branch_name}"] = coco_out_dir / f"disp_left_rect_raw_{branch_name}"
+        debug_dirs[f"disp_left_rect_filtered_{branch_name}"] = (
+            coco_out_dir / f"disp_left_rect_filtered_{branch_name}"
+        )
+        debug_dirs[f"depth_left_rect_raw_{branch_name}"] = coco_out_dir / f"depth_left_rect_raw_{branch_name}"
+    return debug_dirs
 
 
 def _save_debug_branch_artifacts(
@@ -347,6 +373,9 @@ def _save_debug_branch_artifacts(
         left_raw_path = debug_dirs[f"raw_left_{branch_name}"] / f"{stem}.{raw_ext}"
         right_raw_path = debug_dirs[f"raw_right_{branch_name}"] / f"{stem}.{raw_ext}"
         depth_rect_path = debug_dirs[f"depth_left_rect_{branch_name}"] / f"{stem}.png"
+        disp_raw_path = debug_dirs[f"disp_left_rect_raw_{branch_name}"] / f"{stem}.png"
+        disp_filtered_path = debug_dirs[f"disp_left_rect_filtered_{branch_name}"] / f"{stem}.png"
+        depth_raw_path = debug_dirs[f"depth_left_rect_raw_{branch_name}"] / f"{stem}.png"
 
         _save_rgb(
             str(left_raw_path),
@@ -361,22 +390,38 @@ def _save_debug_branch_artifacts(
             jpg_quality=raw_jpg_quality,
         )
 
-        depth_rect = np.asarray(branch_stereo["depth_rect_m"], dtype=np.float32)
-        if depth_save_mode == "u16":
-            _save_png_u16(
-                str(depth_rect_path),
-                meters_to_depth_u16(
-                    depth_rect,
-                    depth_scale_mm=float(depth_scale_mm),
-                ),
-            )
-        elif depth_save_mode == "preview_gray":
-            _save_gray_png(depth_rect_path, _depth_preview_gray(depth_rect))
-        else:
+        _save_debug_depth(
+            depth_rect_path,
+            np.asarray(branch_stereo["depth_rect_m"], dtype=np.float32),
+            depth_scale_mm=depth_scale_mm,
+            save_mode=depth_save_mode,
+        )
+
+        if "disp_rect_raw_px" not in branch_stereo or "depth_raw_m" not in branch_stereo:
             raise ValueError(
-                f"Unsupported debug_output.depth_save_mode={depth_save_mode!r}. "
-                "Expected one of: 'u16', 'preview_gray'."
+                "Debug stereo artifacts are missing. "
+                "Expected stereo_from_ir_pair(..., return_debug_artifacts=True)."
             )
+
+        _save_gray_png(
+            disp_raw_path,
+            _disparity_preview_gray(np.asarray(branch_stereo["disp_rect_raw_px"], dtype=np.float32)),
+        )
+        _save_gray_png(
+            disp_filtered_path,
+            _disparity_preview_gray(
+                np.asarray(
+                    branch_stereo.get("disp_rect_filtered_px", branch_stereo["disp_rect_px"]),
+                    dtype=np.float32,
+                )
+            ),
+        )
+        _save_debug_depth(
+            depth_raw_path,
+            np.asarray(branch_stereo["depth_raw_m"], dtype=np.float32),
+            depth_scale_mm=depth_scale_mm,
+            save_mode=depth_save_mode,
+        )
 
 
 def _overwrite_coco_matched_depth_files(
@@ -594,6 +639,7 @@ def main(argv=None):
                         right_ir_u8=right_ir_saved.copy(),
                         left_depth_gt_m=render_branch["left_depth_m"],
                         plane_distance_m=branch_cfg[branch_name]["plane_distance"],
+                        return_debug_artifacts=True,
                         **branch_cfg[branch_name]["matcher_kwargs"],
                     )
                     aligned_depths[branch_name] = _align_depth_to_color(

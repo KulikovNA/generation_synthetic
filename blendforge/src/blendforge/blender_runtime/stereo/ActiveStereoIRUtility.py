@@ -118,6 +118,7 @@ def stereo_from_ir_pair(
     left_depth_gt_m: Optional[np.ndarray] = None,
     plane_distance_m: Optional[float] = None,
     use_distortion: bool = False,
+    return_debug_artifacts: bool = False,
     **matcher_kwargs,
 ) -> Dict[str, Any]:
     rectify_cfg = build_rectify_from_rs(rs, left_stream, right_stream, use_distortion=use_distortion)
@@ -162,7 +163,17 @@ def stereo_from_ir_pair(
     }
     matcher_cfg.update(matcher_kwargs)
 
-    depth_rect_list, disp_rect_list = stereo_global_matching_rectified(stereo_frames, **matcher_cfg)
+    debug_rect = None
+    if return_debug_artifacts:
+        depth_rect_list, disp_rect_list, debug_rect_list = stereo_global_matching_rectified(
+            stereo_frames,
+            return_debug_artifacts=True,
+            **matcher_cfg,
+        )
+        debug_rect = debug_rect_list[0]
+    else:
+        depth_rect_list, disp_rect_list = stereo_global_matching_rectified(stereo_frames, **matcher_cfg)
+
     depth_rect_m = np.asarray(depth_rect_list[0], dtype=np.float32)
     disp_rect_px = np.asarray(disp_rect_list[0], dtype=np.float32)
     valid = depth_rect_m > 0.0
@@ -177,7 +188,7 @@ def stereo_from_ir_pair(
         ),
     }
 
-    return {
+    result = {
         "rectify_cfg": rectify_cfg,
         "left_rect_u8": left_rect_u8,
         "right_rect_u8": right_rect_u8,
@@ -185,6 +196,17 @@ def stereo_from_ir_pair(
         "disp_rect_px": disp_rect_px,
         "depth_stats": depth_stats,
     }
+
+    if debug_rect is not None:
+        result.update(
+            {
+                "disp_rect_raw_px": np.asarray(debug_rect["disp_raw_px"], dtype=np.float32),
+                "disp_rect_filtered_px": np.asarray(debug_rect["disp_filtered_px"], dtype=np.float32),
+                "depth_raw_m": np.asarray(debug_rect["depth_raw_m"], dtype=np.float32),
+            }
+        )
+
+    return result
 
 
 __all__ = [

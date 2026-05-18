@@ -26,7 +26,7 @@ cc_textures = dict(
 output_dir = "output/seg_with_depth_debug_stereo_multidepth"
 save_config = True
 
-probability_drop = 0.50
+probability_drop = 0.01
 object_model_unit = "cm"
 max_amount_of_samples = 50
 

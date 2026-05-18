@@ -131,13 +131,19 @@ def stereo_depth_from_rectified_pair(
     p1_scale: float = 8.0,
     p2_scale: float = 32.0,
     geom_mask_rect: Optional[np.ndarray] = None,  # in rectified grid, before padding
-) -> Tuple[np.ndarray, np.ndarray]:
+    return_debug_artifacts: bool = False,
+) -> Tuple[np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
     """
     Core stereo on a single ALREADY-RECTIFIED pair.
 
     Returns:
       depth_m   [H,W] float32, invalid=0
       disp_px   [H,W] float32, invalid=0
+
+    If return_debug_artifacts=True, also returns a dict with:
+      disp_raw_px       [H,W] raw disparity after SGBM, before LR/WLS/speckle/fill
+      disp_filtered_px  [H,W] final filtered disparity
+      depth_raw_m       [H,W] direct disparity->depth result before range policy/completion
     """
     if left_u8_rect.ndim != 2 or right_u8_rect.ndim != 2:
         raise ValueError("left/right must be grayscale [H,W].")
@@ -229,6 +235,8 @@ def stereo_depth_from_rectified_pair(
         dispL[~geom_mask_p] = 0.0
         dispR[~geom_mask_p] = 0.0
 
+    disp_raw = dispL.copy()
+
     # LR consistency
     if params.lr_check:
         mask_lr = lr_consistency_mask_auto(
@@ -284,11 +292,15 @@ def stereo_depth_from_rectified_pair(
         disp_final[~geom_mask_p] = 0.0
 
     # disparity -> depth
-    depth = disparity_to_depth(
+    depth_raw = disparity_to_depth(
         disp_final,
         fx=calib.fx_rect,
         baseline_m=calib.baseline_rect_m,
     )
+    if geom_mask_p is not None:
+        depth_raw[~geom_mask_p] = 0.0
+
+    depth = depth_raw.copy()
 
     # depth range policy
     depth = apply_depth_range_policy(
@@ -314,14 +326,30 @@ def stereo_depth_from_rectified_pair(
             depth[~geom_mask_p] = 0.0
 
     # crop back after padding
+    disp_raw = crop_w(disp_raw, padL, W0)
     disp_final = crop_w(disp_final, padL, W0)
+    depth_raw = crop_w(depth_raw, padL, W0)
     depth = crop_w(depth, padL, W0)
 
     # crop_w returns Optional[np.ndarray], but here inputs are never None
-    if disp_final is None or depth is None:
+    if disp_raw is None or disp_final is None or depth_raw is None or depth is None:
         raise RuntimeError("Unexpected None after crop_w")
 
-    return depth.astype(np.float32, copy=False), disp_final.astype(np.float32, copy=False)
+    depth = depth.astype(np.float32, copy=False)
+    disp_final = disp_final.astype(np.float32, copy=False)
+
+    if not return_debug_artifacts:
+        return depth, disp_final
+
+    return (
+        depth,
+        disp_final,
+        {
+            "disp_raw_px": disp_raw.astype(np.float32, copy=False),
+            "disp_filtered_px": disp_final,
+            "depth_raw_m": depth_raw.astype(np.float32, copy=False),
+        },
+    )
 
 
 def stereo_global_matching_rectified(
@@ -356,7 +384,11 @@ def stereo_global_matching_rectified(
     # remove fixed SGBM left band
     border_pad: bool = True,
     pad_left: Optional[int] = None,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    return_debug_artifacts: bool = False,
+) -> (
+    Tuple[List[np.ndarray], List[np.ndarray]]
+    | Tuple[List[np.ndarray], List[np.ndarray], List[Dict[str, np.ndarray]]]
+):
     """
     Rectify-ALWAYS stereo pipeline for a series of stereo frames.
 
@@ -391,6 +423,7 @@ def stereo_global_matching_rectified(
     rect_grid = FrameGrid(name="IR_LEFT_RECT", rectify_meta=rectify_maps)
     depth_out = FrameSeries(grid=rect_grid)
     disp_out = FrameSeries(grid=rect_grid)
+    debug_out: List[Dict[str, np.ndarray]] = []
 
     for idx, stereo in enumerate(stereo_frames):
         if stereo.shape[0] != 2:
@@ -427,7 +460,7 @@ def stereo_global_matching_rectified(
                 depth_max=float(depth_max),
             )
 
-        depth_m, disp_px = stereo_depth_from_rectified_pair(
+        stereo_result = stereo_depth_from_rectified_pair(
             left_r,
             right_r,
             fx_rect=float(fx_rect),
@@ -456,9 +489,19 @@ def stereo_global_matching_rectified(
             border_pad=border_pad,
             pad_left=pad_left,
             geom_mask_rect=geom_mask_rect,
+            return_debug_artifacts=return_debug_artifacts,
         )
+
+        if return_debug_artifacts:
+            depth_m, disp_px, debug_info = stereo_result
+            debug_out.append(debug_info)
+        else:
+            depth_m, disp_px = stereo_result
 
         depth_out.append(depth_m)
         disp_out.append(disp_px)
+
+    if return_debug_artifacts:
+        return depth_out, disp_out, debug_out
 
     return depth_out, disp_out
