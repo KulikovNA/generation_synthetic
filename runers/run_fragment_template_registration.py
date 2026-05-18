@@ -39,10 +39,7 @@ def get_split_cfg(cfg_data: Dict[str, Any], split: str) -> Dict[str, Any]:
     split_cfg = dict(splits.get(split, {}) or {})
     split_cfg.setdefault("num_scenes", cfg_data.get("num_scenes", 1))
     split_cfg.setdefault("num_frames_per_scene", cfg_data.get("num_frames_per_scene", 1))
-    split_cfg.setdefault(
-        "num_scene_workers",
-        int(cfg_data.get("num_gpus", 1)) * int(cfg_data.get("parallel_process_on_one_gpu", 1)),
-    )
+    split_cfg.setdefault("num_scene_workers", cfg_data.get("num_scene_workers", 1))
     return split_cfg
 
 
@@ -81,13 +78,12 @@ def choose_first_scene_id(cfg_data: Dict[str, Any], split: str) -> int:
     return max(requested_offset, existing[-1] + 1)
 
 
-def write_scene_config(base_cfg_data: Dict[str, Any], scene_id: int, split: str, split_cfg: Dict[str, Any], gpu_id: int, worker_id: int) -> Dict[str, Any]:
+def write_scene_config(base_cfg_data: Dict[str, Any], scene_id: int, split: str, split_cfg: Dict[str, Any], worker_id: int) -> Dict[str, Any]:
     scene_cfg = json.loads(json.dumps(base_cfg_data))
     scene_cfg["split"] = split
     scene_cfg["dataset_type"] = split
     scene_cfg["scene_id"] = int(scene_id)
     scene_cfg["num_frames_per_scene"] = int(split_cfg["num_frames_per_scene"])
-    scene_cfg["index_device"] = str(gpu_id)
     scene_cfg["process_id"] = str(worker_id)
     scene_cfg["temp_dir_rgb"] = tempfile.mkdtemp(prefix=f"fragment_rgb_scene{scene_id:06d}_")
     scene_cfg["temp_dir_segmap"] = tempfile.mkdtemp(prefix=f"fragment_seg_scene{scene_id:06d}_")
@@ -113,7 +109,6 @@ def write_scene_config(base_cfg_data: Dict[str, Any], scene_id: int, split: str,
 
 def run_scene_job(job: Dict[str, Any]) -> int:
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = str(job["gpu_id"])
     env.setdefault("OPENCV_IO_ENABLE_OPENEXR", "1")
 
     scene_cfg_paths = write_scene_config(
@@ -121,7 +116,6 @@ def run_scene_job(job: Dict[str, Any]) -> int:
         scene_id=int(job["scene_id"]),
         split=str(job["split"]),
         split_cfg=job["split_cfg"],
-        gpu_id=int(job["gpu_id"]),
         worker_id=int(job["worker_id"]),
     )
 
@@ -134,7 +128,7 @@ def run_scene_job(job: Dict[str, Any]) -> int:
     ]
 
     try:
-        print(f"[fragment_template_registration] Start scene_{int(job['scene_id']):06d} on GPU {job['gpu_id']}")
+        print(f"[fragment_template_registration] Start scene_{int(job['scene_id']):06d}")
         subprocess.run(cmd, env=env, check=True)
         print(f"[fragment_template_registration] Done scene_{int(job['scene_id']):06d}")
         return int(job["scene_id"])
@@ -157,13 +151,11 @@ def main() -> None:
     split_cfg = get_split_cfg(cfg_data, split)
     num_scenes = int(split_cfg["num_scenes"])
     num_workers = max(1, int(split_cfg["num_scene_workers"]))
-    num_gpus = max(1, int(cfg_data.get("num_gpus", 1)))
     first_scene_id = choose_first_scene_id(cfg_data, split)
 
     jobs = []
     for local_scene_idx in range(num_scenes):
         scene_id = first_scene_id + local_scene_idx
-        gpu_id = local_scene_idx % num_gpus
         worker_id = local_scene_idx % num_workers
         jobs.append(
             {
@@ -171,7 +163,6 @@ def main() -> None:
                 "split": split,
                 "split_cfg": split_cfg,
                 "scene_id": scene_id,
-                "gpu_id": gpu_id,
                 "worker_id": worker_id,
             }
         )

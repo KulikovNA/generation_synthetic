@@ -1,9 +1,5 @@
 mode = "fragment_template_registration"
 
-# Resources
-parallel_process_on_one_gpu = 1
-num_gpus = 1
-
 dataset_parent_path = "prepared"
 bop_dataset_name = "differBig"
 object_model_unit = "cm"
@@ -16,7 +12,7 @@ save_config = True
 split = "test"
 num_scenes = 4
 num_frames_per_scene = 5
-num_scene_workers = 1
+num_scene_workers = 2
 scene_id_offset = 0
 # None means: generate a random per-scene seed in the runner and save it
 # into the generated scene config/metadata. Use an int for reproducible
@@ -70,9 +66,9 @@ camera_sampling = {
 }
 
 render = {
+    # Use either a fixed value, e.g. 50, or an inclusive random range, e.g. [32, 96].
     "max_amount_of_samples": 50,
 }
-max_amount_of_samples = 50
 
 depth_scale_mm = 1.0
 visible_points_pixel_stride = 1

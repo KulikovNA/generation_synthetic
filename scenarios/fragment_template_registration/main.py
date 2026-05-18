@@ -95,6 +95,43 @@ def resolve_fracture_seed(fracture_cfg: Mapping[str, Any], scene_seed: int) -> t
     return normalize_seed_for_blender(raw_seed, name="fracture.seed"), "fracture_config_seed"
 
 
+def resolve_int_or_range(value: Any, *, name: str, min_value: int = 1) -> tuple[int, Dict[str, Any]]:
+    if isinstance(value, Mapping):
+        if "min" not in value or "max" not in value:
+            raise ValueError(f"{name} mapping must contain 'min' and 'max'")
+        low = int(value["min"])
+        high = int(value["max"])
+        mode = "range"
+        configured: Any = {"min": low, "max": high}
+    elif isinstance(value, (list, tuple)):
+        if len(value) != 2:
+            raise ValueError(f"{name} range must contain exactly two values")
+        low = int(value[0])
+        high = int(value[1])
+        mode = "range"
+        configured = [low, high]
+    else:
+        resolved = int(value)
+        if resolved < min_value:
+            raise ValueError(f"{name} must be >= {min_value}")
+        return resolved, {
+            "mode": "fixed",
+            "configured": resolved,
+            "resolved": resolved,
+        }
+
+    if low < min_value or high < min_value:
+        raise ValueError(f"{name} range values must be >= {min_value}")
+    if high < low:
+        raise ValueError(f"{name} range max must be >= min")
+    resolved = int(np.random.randint(low, high + 1))
+    return resolved, {
+        "mode": mode,
+        "configured": configured,
+        "resolved": resolved,
+    }
+
+
 def object_unit_scale_to_scene_unit(object_model_unit: str) -> float:
     unit_to_scale = {"m": 1.0, "dm": 0.1, "cm": 0.01, "mm": 0.001}
     if object_model_unit not in unit_to_scale:
@@ -386,9 +423,14 @@ def add_camera_poses(num_frames: int, cfg: Config) -> None:
         bproc.camera.add_camera_pose(cam2world)
 
 
-def render_scene(cfg: Config) -> Dict[str, Any]:
+def render_scene(cfg: Config) -> tuple[Dict[str, Any], Dict[str, Any]]:
     render_cfg = nested_cfg(cfg, "render", {})
-    max_samples = int(render_cfg.get("max_amount_of_samples", cfg_get(cfg, "max_amount_of_samples", 50)))
+    raw_max_samples = render_cfg.get("max_amount_of_samples", cfg_get(cfg, "max_amount_of_samples", 50))
+    max_samples, max_samples_metadata = resolve_int_or_range(
+        raw_max_samples,
+        name="render.max_amount_of_samples",
+        min_value=1,
+    )
     bproc.renderer.set_max_amount_of_samples(max_samples)
     bproc.renderer.enable_depth_output(activate_antialiasing=False)
     bproc.renderer.enable_segmentation_output(
@@ -410,10 +452,14 @@ def render_scene(cfg: Config) -> Dict[str, Any]:
         output_dir=cfg_get(cfg, "temp_dir_segmap", None),
         file_prefix=f"segmap_scene{int(cfg_get(cfg, 'scene_id', 0)):06d}_",
     )
-    return bproc.renderer.render(
+    data = bproc.renderer.render(
         output_dir=cfg_get(cfg, "temp_dir_rgb", None),
         file_prefix=f"rgb_scene{int(cfg_get(cfg, 'scene_id', 0)):06d}_",
     )
+    return data, {
+        "max_amount_of_samples": int(max_samples),
+        "max_amount_of_samples_setting": max_samples_metadata,
+    }
 
 
 def main(args: Optional[Sequence[str]] = None) -> None:
@@ -557,7 +603,7 @@ def main(args: Optional[Sequence[str]] = None) -> None:
     remove_object_by_name_if_exists(digital_twin_name)
 
     add_camera_poses(num_frames, cfg)
-    data = render_scene(cfg)
+    data, render_metadata = render_scene(cfg)
 
     writer.write_frames(
         colors=data["colors"],
@@ -596,6 +642,7 @@ def main(args: Optional[Sequence[str]] = None) -> None:
             "base_config_seed": base_config_seed,
             "fracture_seed": int(fracture_seed),
             "fracture_seed_source": fracture_seed_source,
+            "render": render_metadata,
             "num_fragments_total": int(len(fragments)),
             "num_fragments_annotated": int(len(fragment_records)),
             "num_fragments_ignored": int(len(fragments) - len(fragment_records)),

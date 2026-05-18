@@ -146,11 +146,14 @@ class Config:
         """
 
         required_params = {
-            'num_gpus': int,
-            'parallel_process_on_one_gpu': int,
-            'mode': str, 
-            'cc_textures': dict
+            'mode': str,
+            'cc_textures': dict,
         }
+        if self._data.get('mode') != 'fragment_template_registration':
+            required_params.update({
+                'num_gpus': int,
+                'parallel_process_on_one_gpu': int,
+            })
         
         for param, p_type in required_params.items():
             if param not in self._data:
@@ -305,12 +308,7 @@ class Config:
             split_cfg = {
                 'num_scenes': int(self._data.get('num_scenes', 1)),
                 'num_frames_per_scene': int(self._data.get('num_frames_per_scene', 1)),
-                'num_scene_workers': int(
-                    self._data.get(
-                        'num_scene_workers',
-                        self._data['num_gpus'] * self._data['parallel_process_on_one_gpu'],
-                    )
-                ),
+                'num_scene_workers': int(self._data.get('num_scene_workers', 1)),
             }
         else:
             if split not in splits:
@@ -318,10 +316,7 @@ class Config:
             split_cfg = splits[split]
         split_cfg.setdefault('num_scenes', int(self._data.get('num_scenes', 1)))
         split_cfg.setdefault('num_frames_per_scene', int(self._data.get('num_frames_per_scene', 1)))
-        split_cfg.setdefault(
-            'num_scene_workers',
-            int(self._data.get('num_scene_workers', self._data['num_gpus'] * self._data['parallel_process_on_one_gpu'])),
-        )
+        split_cfg.setdefault('num_scene_workers', int(self._data.get('num_scene_workers', 1)))
         if int(split_cfg['num_scenes']) < 1:
             raise ValueError("num_scenes must be >= 1")
         if int(split_cfg['num_frames_per_scene']) < 1:
@@ -341,7 +336,7 @@ class Config:
         self._data.setdefault('overwrite_scene', False)
         self._data.setdefault('overwrite_models', False)
         self._data.setdefault('visible_points_pixel_stride', 1)
-        self._data.setdefault('max_amount_of_samples', 50)
+        legacy_max_amount_of_samples = self._data.pop('max_amount_of_samples', None)
 
         if 'object_selector' not in self._data:
             values = self._data.get('object_ids', None)
@@ -382,9 +377,12 @@ class Config:
             'rotation_factor': 11.0,
         })
 
-        self._data.setdefault('render', {
-            'max_amount_of_samples': int(self._data.get('max_amount_of_samples', 50)),
-        })
+        if 'render' not in self._data:
+            self._data['render'] = {
+                'max_amount_of_samples': legacy_max_amount_of_samples
+                if legacy_max_amount_of_samples is not None
+                else 50,
+            }
 
         self._data.setdefault('surface_labeling', {
             'method': 'distance_and_normal_to_digital_twin',
