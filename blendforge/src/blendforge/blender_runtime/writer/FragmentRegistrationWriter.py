@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
+import time
 from itertools import groupby
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -32,16 +34,76 @@ def ensure_dir(path: str) -> None:
 
 
 def write_json_atomic(path: str, obj: Any, indent: Optional[int] = 2) -> None:
-    ensure_dir(os.path.dirname(path))
-    tmp = path + ".tmp"
+    dirpath = os.path.dirname(path)
+    ensure_dir(dirpath)
+    fd, tmp = tempfile.mkstemp(
+        prefix=os.path.basename(path) + ".",
+        suffix=".tmp",
+        dir=dirpath,
+        text=True,
+    )
     kwargs: Dict[str, Any] = {"ensure_ascii": False}
     if indent is None:
         kwargs["separators"] = (",", ":")
     else:
         kwargs["indent"] = indent
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, **kwargs)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, **kwargs)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def acquire_file_lock(lock_path: str, *, timeout_sec: float = 600.0, poll_sec: float = 0.1) -> int:
+    ensure_dir(os.path.dirname(lock_path))
+    started = time.monotonic()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+            return fd
+        except FileExistsError:
+            if file_lock_owner_is_dead(lock_path):
+                try:
+                    os.unlink(lock_path)
+                    continue
+                except FileNotFoundError:
+                    continue
+            if time.monotonic() - started > timeout_sec:
+                raise TimeoutError(f"Timed out waiting for lock: {lock_path}")
+            time.sleep(poll_sec)
+
+
+def file_lock_owner_is_dead(lock_path: str) -> bool:
+    try:
+        with open(lock_path, "r", encoding="ascii") as f:
+            raw_pid = f.read().strip()
+        pid = int(raw_pid)
+    except Exception:
+        return False
+
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def release_file_lock(fd: int, lock_path: str) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(lock_path)
+    except FileNotFoundError:
+        pass
 
 
 def save_png_u8(path: str, arr: np.ndarray) -> None:
@@ -366,37 +428,42 @@ class FragmentRegistrationWriter:
             **meta,
         }
 
-        if os.path.exists(abs_path):
-            if not os.path.exists(meta_path):
-                if not overwrite_model:
-                    raise FileExistsError(
-                        f"Model already exists without metadata: {abs_path}. "
-                        "Remove it or enable overwrite_model for this scenario."
-                    )
-            else:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    existing_meta = json.load(f)
-                comparable_existing = {k: v for k, v in existing_meta.items() if k != "mesh_sha256"}
-                if comparable_existing == expected_meta and not overwrite_model:
-                    current_hash = file_sha256(abs_path)
-                    expected_hash = existing_meta.get("mesh_sha256")
-                    if expected_hash is not None and str(expected_hash) != current_hash:
+        lock_path = abs_path + ".lock"
+        lock_fd = acquire_file_lock(lock_path)
+        try:
+            if os.path.exists(abs_path):
+                if not os.path.exists(meta_path):
+                    if not overwrite_model:
                         raise FileExistsError(
-                            f"Model hash mismatch for existing file: {abs_path}. "
-                            "The sidecar metadata does not match the mesh bytes."
+                            f"Model already exists without metadata: {abs_path}. "
+                            "Remove it or enable overwrite_model for this scenario."
                         )
-                    return self.rel_to_split(abs_path), current_hash
-                if not overwrite_model:
-                    raise FileExistsError(
-                        f"Model metadata mismatch for existing file: {abs_path}. "
-                        "Use another scale/config or enable overwrite_model only intentionally."
-                    )
+                else:
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        existing_meta = json.load(f)
+                    comparable_existing = {k: v for k, v in existing_meta.items() if k != "mesh_sha256"}
+                    if comparable_existing == expected_meta and not overwrite_model:
+                        current_hash = file_sha256(abs_path)
+                        expected_hash = existing_meta.get("mesh_sha256")
+                        if expected_hash is not None and str(expected_hash) != current_hash:
+                            raise FileExistsError(
+                                f"Model hash mismatch for existing file: {abs_path}. "
+                                "The sidecar metadata does not match the mesh bytes."
+                            )
+                        return self.rel_to_split(abs_path), current_hash
+                    if not overwrite_model:
+                        raise FileExistsError(
+                            f"Model metadata mismatch for existing file: {abs_path}. "
+                            "Use another scale/config or enable overwrite_model only intentionally."
+                        )
 
-        write_mesh_object_ply(abs_path, object_bpy)
-        mesh_hash = file_sha256(abs_path)
-        expected_meta["mesh_sha256"] = mesh_hash
-        write_json_atomic(meta_path, expected_meta, indent=self.indent)
-        return self.rel_to_split(abs_path), mesh_hash
+            write_mesh_object_ply(abs_path, object_bpy)
+            mesh_hash = file_sha256(abs_path)
+            expected_meta["mesh_sha256"] = mesh_hash
+            write_json_atomic(meta_path, expected_meta, indent=self.indent)
+            return self.rel_to_split(abs_path), mesh_hash
+        finally:
+            release_file_lock(lock_fd, lock_path)
 
     def write_fragment_assets(
         self,

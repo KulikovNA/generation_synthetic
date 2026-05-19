@@ -5,7 +5,7 @@ bop_dataset_name = "differBig"
 object_model_unit = "cm"
 manifold = True
 
-output_dir = "output/fragment_template_registration"
+output_dir = "/home/nikita/data_generator/generation_dataset/generation_synthetic/output/fragment_template_registration"
 save_config = True
 
 # Split orchestration. Run the runner separately for train/val/test.
